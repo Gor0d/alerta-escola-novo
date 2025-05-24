@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "checkJs": true, // Ativa verificação de tipos em JS
+    "jsx": "react-native",
+    "module": "commonjs",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"] // Ajuste se usar aliases de importação
+    }
+  },
+  "include": ["**/*.js", "**/*.jsx"],
+  "exclude": ["node_modules"]
+}
