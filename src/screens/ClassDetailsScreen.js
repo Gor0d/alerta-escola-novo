@@ -10,7 +10,8 @@ import {
   ActivityIndicator,
   Alert,
   SafeAreaView,
-  RefreshControl
+  RefreshControl,
+  ScrollView
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../contexts/AuthContext';
@@ -26,55 +27,126 @@ export default function ClassDetailsScreen({ route, navigation }) {
   const [modalVisible, setModalVisible] = useState(false);
   const [newStudentName, setNewStudentName] = useState('');
   const [parentEmail, setParentEmail] = useState('');
+  const [selectedParent, setSelectedParent] = useState(null);
+  const [availableParents, setAvailableParents] = useState([]);
+  const [showParentDropdown, setShowParentDropdown] = useState(false);
   const [addingStudent, setAddingStudent] = useState(false);
 
   useEffect(() => {
     fetchStudents();
+    fetchAvailableParents();
   }, []);
 
   const fetchStudents = async () => {
     try {
       setLoading(true);
+      console.log('Buscando alunos para a turma:', classId);
       
-      // Buscar alunos matriculados nesta turma
-      const { data: enrollments, error } = await supabase
+      // Query sem usar campo id - usar student_id e class_id como chave composta
+      const { data: enrollments, error: enrollmentError } = await supabase
         .from('enrollments')
-        .select(`
-          id,
-          status,
-          students (
-            id,
-            name,
-            parent_id,
-            profiles (
-              name,
-              email
-            )
-          )
-        `)
+        .select('student_id, class_id, status, enrolled_at')
         .eq('class_id', classId);
 
-      if (error) throw error;
+      if (enrollmentError) {
+        console.error('Erro ao buscar enrollments:', enrollmentError);
+        throw enrollmentError;
+      }
 
-      // Transformar dados para formato mais fácil de usar
-      const studentsData = (enrollments || []).map(enrollment => ({
-        enrollmentId: enrollment.id,
-        id: enrollment.students.id,
-        name: enrollment.students.name,
-        status: enrollment.status,
-        parentId: enrollment.students.parent_id,
-        parentName: enrollment.students.profiles?.name || 'Sem responsável',
-        parentEmail: enrollment.students.profiles?.email || 'Email não informado'
-      }));
+      console.log('Enrollments encontrados:', enrollments);
 
-      console.log('Students in class:', studentsData);
-      setStudents(studentsData);
+      if (!enrollments || enrollments.length === 0) {
+        console.log('Nenhum enrollment encontrado');
+        setStudents([]);
+        return;
+      }
+
+      // Para cada enrollment, buscar dados do estudante
+      const studentsData = await Promise.all(
+        enrollments.map(async (enrollment) => {
+          try {
+            // Buscar dados do estudante
+            const { data: student, error: studentError } = await supabase
+              .from('students')
+              .select('*')
+              .eq('id', enrollment.student_id)
+              .single();
+
+            if (studentError) {
+              console.error('Erro ao buscar estudante:', studentError);
+              return null;
+            }
+
+            // Buscar dados do responsável se existir
+            let parentData = null;
+            if (student.parent_id) {
+              const { data: parent, error: parentError } = await supabase
+                .from('profiles')
+                .select('name, email')
+                .eq('id', student.parent_id)
+                .single();
+
+              if (!parentError && parent) {
+                parentData = parent;
+              }
+            }
+
+            return {
+              // Usar combinação student_id + class_id como identificador único
+              enrollmentKey: `${enrollment.student_id}_${enrollment.class_id}`,
+              id: student.id,
+              name: student.name,
+              status: enrollment.status || 'active',
+              parentId: student.parent_id,
+              parentName: parentData?.name || 'Sem responsável',
+              parentEmail: parentData?.email || 'Email não informado',
+              birthDate: student.birth_date,
+              active: student.active,
+              studentId: enrollment.student_id,
+              classId: enrollment.class_id
+            };
+
+          } catch (error) {
+            console.error('Erro ao processar enrollment:', error);
+            return null;
+          }
+        })
+      );
+
+      // Filtrar nulls e definir estudantes
+      const validStudents = studentsData.filter(student => student !== null);
+      console.log('Estudantes processados:', validStudents);
+      setStudents(validStudents);
+
     } catch (error) {
-      console.error('Erro ao buscar alunos:', error);
-      Alert.alert('Erro', 'Não foi possível carregar os alunos');
+      console.error('Erro geral ao buscar alunos:', error);
+      Alert.alert('Erro', `Não foi possível carregar os alunos: ${error.message}`);
+      setStudents([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  };
+
+  const fetchAvailableParents = async () => {
+    try {
+      console.log('Buscando responsáveis disponíveis...');
+      
+      const { data: parents, error } = await supabase
+        .from('profiles')
+        .select('id, name, email')
+        .eq('role', 'parent')
+        .order('name');
+
+      if (error) {
+        console.error('Erro ao buscar responsáveis:', error);
+        return;
+      }
+
+      console.log('Responsáveis encontrados:', parents);
+      setAvailableParents(parents || []);
+    } catch (error) {
+      console.error('Erro ao carregar responsáveis:', error);
     }
   };
 
@@ -111,22 +183,14 @@ export default function ClassDetailsScreen({ route, navigation }) {
 
     try {
       setAddingStudent(true);
+      console.log('Adicionando estudante:', newStudentName);
       
       let parentId = null;
       
-      // Se um email foi fornecido, buscar o responsável
-      if (parentEmail.trim()) {
-        const parent = await findParentByEmail(parentEmail);
-        
-        if (parent) {
-          parentId = parent.id;
-          console.log('Responsável encontrado:', parent);
-        } else {
-          Alert.alert(
-            'Responsável não encontrado',
-            `Não foi encontrado um responsável cadastrado com o email "${parentEmail}". O aluno será criado sem responsável vinculado.`
-          );
-        }
+      // Usar o responsável selecionado do dropdown
+      if (selectedParent) {
+        parentId = selectedParent.id;
+        console.log('Responsável selecionado:', selectedParent);
       }
       
       // Criar o aluno
@@ -134,16 +198,20 @@ export default function ClassDetailsScreen({ route, navigation }) {
         .from('students')
         .insert([{
           name: newStudentName.trim(),
-          parent_id: parentId
+          parent_id: parentId,
+          active: true
         }])
         .select()
         .single();
 
-      if (studentError) throw studentError;
+      if (studentError) {
+        console.error('Erro ao criar estudante:', studentError);
+        throw studentError;
+      }
 
       console.log('Aluno criado:', studentData);
       
-      // Matricular o aluno na turma
+      // Matricular o aluno na turma - sem usar campo id
       const { error: enrollmentError } = await supabase
         .from('enrollments')
         .insert([{
@@ -152,11 +220,16 @@ export default function ClassDetailsScreen({ route, navigation }) {
           status: 'active'
         }]);
 
-      if (enrollmentError) throw enrollmentError;
+      if (enrollmentError) {
+        console.error('Erro ao criar enrollment:', enrollmentError);
+        throw enrollmentError;
+      }
+
+      console.log('Enrollment criado com sucesso');
 
       // Limpar formulário e fechar modal
       setNewStudentName('');
-      setParentEmail('');
+      setSelectedParent(null);
       setModalVisible(false);
       
       Alert.alert('Sucesso', 'Aluno adicionado com sucesso!');
@@ -166,7 +239,7 @@ export default function ClassDetailsScreen({ route, navigation }) {
       
     } catch (error) {
       console.error('Erro ao adicionar aluno:', error);
-      Alert.alert('Erro', 'Não foi possível adicionar o aluno');
+      Alert.alert('Erro', `Não foi possível adicionar o aluno: ${error.message}`);
     } finally {
       setAddingStudent(false);
     }
@@ -183,23 +256,59 @@ export default function ClassDetailsScreen({ route, navigation }) {
           style: 'destructive',
           onPress: async () => {
             try {
+              console.log('Removendo enrollment para student_id:', student.studentId, 'class_id:', student.classId);
+              
+              // Deletar usando chave composta student_id + class_id
               const { error } = await supabase
                 .from('enrollments')
                 .delete()
-                .eq('id', student.enrollmentId);
+                .eq('student_id', student.studentId)
+                .eq('class_id', student.classId);
 
-              if (error) throw error;
+              if (error) {
+                console.error('Erro ao remover enrollment:', error);
+                throw error;
+              }
 
               Alert.alert('Sucesso', 'Aluno removido da turma');
               fetchStudents();
             } catch (error) {
               console.error('Erro ao remover aluno:', error);
-              Alert.alert('Erro', 'Não foi possível remover o aluno');
+              Alert.alert('Erro', `Não foi possível remover o aluno: ${error.message}`);
             }
           }
         }
       ]
     );
+  };
+
+  const toggleAttendance = async (student) => {
+    try {
+      const newStatus = student.status === 'present' ? 'absent' : 'present';
+      
+      console.log('Alterando status do aluno:', student.name, 'para:', newStatus);
+      
+      // Atualizar usando chave composta student_id + class_id
+      const { error } = await supabase
+        .from('enrollments')
+        .update({ status: newStatus })
+        .eq('student_id', student.studentId)
+        .eq('class_id', student.classId);
+
+      if (error) {
+        console.error('Erro ao atualizar status:', error);
+        throw error;
+      }
+
+      // Atualizar estado local
+      setStudents(students.map(s => 
+        s.id === student.id ? { ...s, status: newStatus } : s
+      ));
+
+    } catch (error) {
+      console.error('Erro ao alterar presença:', error);
+      Alert.alert('Erro', `Não foi possível alterar a presença: ${error.message}`);
+    }
   };
 
   const renderStudentCard = ({ item: student }) => (
@@ -217,22 +326,28 @@ export default function ClassDetailsScreen({ route, navigation }) {
             <Text style={styles.parentEmail}>{student.parentEmail}</Text>
           )}
         </View>
-        <TouchableOpacity
-          style={styles.removeButton}
-          onPress={() => removeStudent(student)}
-        >
-          <Ionicons name="trash-outline" size={20} color={theme.colors.error} />
-        </TouchableOpacity>
-      </View>
-      
-      <View style={styles.studentStatus}>
-        <View style={[
-          styles.statusBadge,
-          student.status === 'active' ? styles.activeBadge : styles.inactiveBadge
-        ]}>
-          <Text style={styles.statusText}>
-            {student.status === 'active' ? 'Ativo' : 'Inativo'}
-          </Text>
+        <View style={styles.studentActions}>
+          <TouchableOpacity
+            style={styles.attendanceButton}
+            onPress={() => toggleAttendance(student)}
+          >
+            <View style={[
+              styles.statusBadge,
+              student.status === 'present' ? styles.presentBadge : 
+              student.status === 'absent' ? styles.absentBadge : styles.activeBadge
+            ]}>
+              <Text style={styles.statusText}>
+                {student.status === 'present' ? 'Presente' : 
+                 student.status === 'absent' ? 'Ausente' : 'Ativo'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.removeButton}
+            onPress={() => removeStudent(student)}
+          >
+            <Ionicons name="trash-outline" size={20} color={theme.colors.error} />
+          </TouchableOpacity>
         </View>
       </View>
     </View>
@@ -262,23 +377,23 @@ export default function ClassDetailsScreen({ route, navigation }) {
         <View style={styles.summaryCard}>
           <Ionicons name="people" size={24} color={theme.colors.primary} />
           <Text style={styles.summaryNumber}>{students.length}</Text>
-          <Text style={styles.summaryLabel}>Total de Alunos</Text>
+          <Text style={styles.summaryLabel}>Total</Text>
         </View>
         
         <View style={styles.summaryCard}>
           <Ionicons name="checkmark-circle" size={24} color={theme.colors.success} />
           <Text style={styles.summaryNumber}>
-            {students.filter(s => s.status === 'active').length}
+            {students.filter(s => s.status === 'present').length}
           </Text>
-          <Text style={styles.summaryLabel}>Ativos</Text>
+          <Text style={styles.summaryLabel}>Presentes</Text>
         </View>
 
         <View style={styles.summaryCard}>
-          <Ionicons name="person-add" size={24} color={theme.colors.warning} />
+          <Ionicons name="close-circle" size={24} color={theme.colors.error} />
           <Text style={styles.summaryNumber}>
-            {students.filter(s => s.parentId).length}
+            {students.filter(s => s.status === 'absent').length}
           </Text>
-          <Text style={styles.summaryLabel}>Com Responsável</Text>
+          <Text style={styles.summaryLabel}>Ausentes</Text>
         </View>
       </View>
 
@@ -295,11 +410,17 @@ export default function ClassDetailsScreen({ route, navigation }) {
             <Text style={styles.emptyStateText}>
               Adicione alunos para começar a gerenciar a turma
             </Text>
+            <TouchableOpacity
+              style={styles.addFirstStudentButton}
+              onPress={() => setModalVisible(true)}
+            >
+              <Text style={styles.addFirstStudentText}>Adicionar Primeiro Aluno</Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <FlatList
             data={students}
-            keyExtractor={(item) => item.id}
+            keyExtractor={(item) => item.enrollmentKey}
             renderItem={renderStudentCard}
             refreshControl={
               <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
@@ -318,58 +439,151 @@ export default function ClassDetailsScreen({ route, navigation }) {
       >
         <View style={styles.modalContainer}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Adicionar Aluno</Text>
-            
-            <View style={styles.inputContainer}>
-              <Text style={styles.label}>Nome do Aluno *</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Digite o nome completo do aluno"
-                value={newStudentName}
-                onChangeText={setNewStudentName}
-                autoCapitalize="words"
-              />
-            </View>
-            
-            <View style={styles.inputContainer}>
-              <Text style={styles.label}>Email do Responsável (opcional)</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Digite o email do responsável"
-                value={parentEmail}
-                onChangeText={setParentEmail}
-                keyboardType="email-address"
-                autoCapitalize="none"
-              />
-              <Text style={styles.helperText}>
-                Se o responsável já tiver cadastro, será vinculado automaticamente
-              </Text>
-            </View>
-            
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => {
-                  setModalVisible(false);
-                  setNewStudentName('');
-                  setParentEmail('');
-                }}
-              >
-                <Text style={styles.cancelButtonText}>Cancelar</Text>
-              </TouchableOpacity>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalTitle}>Adicionar Aluno</Text>
               
-              <TouchableOpacity
-                style={[styles.saveButton, addingStudent && styles.disabledButton]}
-                onPress={addStudent}
-                disabled={addingStudent}
-              >
-                {addingStudent ? (
-                  <ActivityIndicator size="small" color="white" />
-                ) : (
-                  <Text style={styles.saveButtonText}>Adicionar</Text>
+              <View style={styles.inputContainer}>
+                <Text style={styles.label}>Nome do Aluno *</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Digite o nome completo do aluno"
+                  value={newStudentName}
+                  onChangeText={setNewStudentName}
+                  autoCapitalize="words"
+                />
+              </View>
+              
+              <View style={styles.inputContainer}>
+                <Text style={styles.label}>Responsável (opcional)</Text>
+                <TouchableOpacity
+                  style={styles.dropdownButton}
+                  onPress={() => setShowParentDropdown(!showParentDropdown)}
+                >
+                  <View style={styles.dropdownButtonContent}>
+                    <View style={styles.dropdownTextContainer}>
+                      <Text style={[
+                        styles.dropdownButtonText,
+                        !selectedParent && styles.dropdownPlaceholder
+                      ]} numberOfLines={1}>
+                        {selectedParent ? selectedParent.name : 'Selecionar responsável'}
+                      </Text>
+                      {selectedParent && selectedParent.email && (
+                        <Text style={styles.dropdownButtonEmail} numberOfLines={1}>
+                          {selectedParent.email}
+                        </Text>
+                      )}
+                    </View>
+                    <Ionicons 
+                      name={showParentDropdown ? "chevron-up" : "chevron-down"} 
+                      size={20} 
+                      color={theme.colors.text.secondary} 
+                    />
+                  </View>
+                </TouchableOpacity>
+                
+                {showParentDropdown && (
+                  <View style={styles.dropdownList}>
+                    <ScrollView 
+                      style={styles.dropdownScrollView} 
+                      nestedScrollEnabled={true}
+                      keyboardShouldPersistTaps="handled"
+                    >
+                      <TouchableOpacity
+                        style={[styles.dropdownItem, styles.dropdownItemFirst]}
+                        onPress={() => {
+                          setSelectedParent(null);
+                          setShowParentDropdown(false);
+                        }}
+                      >
+                        <View style={styles.dropdownItemContent}>
+                          <Ionicons name="person-remove" size={20} color={theme.colors.text.light} />
+                          <Text style={[styles.dropdownItemText, styles.noParentText]}>
+                            Sem responsável
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                      
+                      {availableParents.map((parent, index) => (
+                        <TouchableOpacity
+                          key={parent.id}
+                          style={[
+                            styles.dropdownItem,
+                            selectedParent?.id === parent.id && styles.dropdownItemSelected
+                          ]}
+                          onPress={() => {
+                            setSelectedParent(parent);
+                            setShowParentDropdown(false);
+                          }}
+                        >
+                          <View style={styles.dropdownItemContent}>
+                            <Ionicons 
+                              name="person" 
+                              size={20} 
+                              color={selectedParent?.id === parent.id ? theme.colors.primary : theme.colors.text.secondary} 
+                            />
+                            <View style={styles.parentDropdownInfo}>
+                              <Text style={[
+                                styles.dropdownItemText,
+                                selectedParent?.id === parent.id && styles.dropdownItemTextSelected
+                              ]} numberOfLines={1}>
+                                {parent.name}
+                              </Text>
+                              <Text style={[
+                                styles.dropdownItemEmail,
+                                selectedParent?.id === parent.id && styles.dropdownItemEmailSelected
+                              ]} numberOfLines={1}>
+                                {parent.email}
+                              </Text>
+                            </View>
+                          </View>
+                        </TouchableOpacity>
+                      ))}
+                      
+                      {availableParents.length === 0 && (
+                        <View style={styles.dropdownItem}>
+                          <View style={styles.dropdownItemContent}>
+                            <Ionicons name="information-circle" size={20} color={theme.colors.text.light} />
+                            <Text style={styles.dropdownEmptyText}>
+                              Nenhum responsável cadastrado
+                            </Text>
+                          </View>
+                        </View>
+                      )}
+                    </ScrollView>
+                  </View>
                 )}
-              </TouchableOpacity>
-            </View>
+                
+                <Text style={styles.helperText}>
+                  Escolha um responsável da lista ou deixe sem responsável
+                </Text>
+              </View>
+              
+              <View style={styles.modalButtons}>
+                <TouchableOpacity
+                  style={styles.cancelButton}
+                  onPress={() => {
+                    setModalVisible(false);
+                    setNewStudentName('');
+                    setSelectedParent(null);
+                    setShowParentDropdown(false);
+                  }}
+                >
+                  <Text style={styles.cancelButtonText}>Cancelar</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity
+                  style={[styles.saveButton, addingStudent && styles.disabledButton]}
+                  onPress={addStudent}
+                  disabled={addingStudent}
+                >
+                  {addingStudent ? (
+                    <ActivityIndicator size="small" color="white" />
+                  ) : (
+                    <Text style={styles.saveButtonText}>Adicionar</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -470,7 +684,6 @@ const styles = StyleSheet.create({
   studentHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: theme.spacing.sm,
   },
   avatarContainer: {
     width: 50,
@@ -499,6 +712,13 @@ const styles = StyleSheet.create({
     color: theme.colors.text.light,
     marginTop: 2,
   },
+  studentActions: {
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  attendanceButton: {
+    marginBottom: theme.spacing.xs,
+  },
   removeButton: {
     width: 36,
     height: 36,
@@ -507,23 +727,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  studentStatus: {
-    alignItems: 'flex-start',
-  },
   statusBadge: {
     paddingHorizontal: theme.spacing.sm,
     paddingVertical: 4,
     borderRadius: 12,
+    minWidth: 70,
+    alignItems: 'center',
   },
-  activeBadge: {
+  presentBadge: {
     backgroundColor: theme.colors.success,
   },
-  inactiveBadge: {
+  absentBadge: {
     backgroundColor: theme.colors.error,
+  },
+  activeBadge: {
+    backgroundColor: theme.colors.primary,
   },
   statusText: {
     color: 'white',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
   },
   loader: {
@@ -547,6 +769,18 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: theme.spacing.sm,
     lineHeight: 20,
+    marginBottom: theme.spacing.lg,
+  },
+  addFirstStudentButton: {
+    backgroundColor: theme.colors.primary,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+  },
+  addFirstStudentText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 16,
   },
   modalContainer: {
     flex: 1,
@@ -556,6 +790,7 @@ const styles = StyleSheet.create({
   },
   modalContent: {
     width: '90%',
+    maxHeight: '80%',
     backgroundColor: 'white',
     borderRadius: theme.borderRadius.lg,
     padding: theme.spacing.xl,
@@ -599,6 +834,7 @@ const styles = StyleSheet.create({
   modalButtons: {
     flexDirection: 'row',
     gap: theme.spacing.md,
+    marginTop: theme.spacing.lg,
   },
   cancelButton: {
     flex: 1,
@@ -624,5 +860,97 @@ const styles = StyleSheet.create({
   saveButtonText: {
     color: 'white',
     fontWeight: '600',
+  },
+  // Estilos do Dropdown Melhorado
+  dropdownButton: {
+    minHeight: 60,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.borderRadius.md,
+    paddingHorizontal: theme.spacing.md,
+    backgroundColor: theme.colors.surface,
+    justifyContent: 'center',
+  },
+  dropdownButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dropdownTextContainer: {
+    flex: 1,
+    marginRight: theme.spacing.sm,
+  },
+  dropdownButtonText: {
+    fontSize: 16,
+    color: theme.colors.text.primary,
+  },
+  dropdownButtonEmail: {
+    fontSize: 12,
+    color: theme.colors.text.light,
+    marginTop: 2,
+  },
+  dropdownPlaceholder: {
+    color: theme.colors.text.light,
+  },
+  dropdownList: {
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.borderRadius.md,
+    backgroundColor: 'white',
+    marginTop: 4,
+    maxHeight: 200,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  dropdownScrollView: {
+    maxHeight: 200,
+  },
+  dropdownItem: {
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.divider,
+  },
+  dropdownItemFirst: {
+    borderTopWidth: 0,
+  },
+  dropdownItemSelected: {
+    backgroundColor: theme.colors.primary + '10',
+  },
+  dropdownItemContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  parentDropdownInfo: {
+    flex: 1,
+  },
+  dropdownItemText: {
+    fontSize: 16,
+    color: theme.colors.text.primary,
+  },
+  dropdownItemTextSelected: {
+    color: theme.colors.primary,
+    fontWeight: '600',
+  },
+  dropdownItemEmail: {
+    fontSize: 12,
+    color: theme.colors.text.light,
+    marginTop: 2,
+  },
+  dropdownItemEmailSelected: {
+    color: theme.colors.primary,
+  },
+  noParentText: {
+    fontStyle: 'italic',
+    color: theme.colors.text.light,
+  },
+  dropdownEmptyText: {
+    fontSize: 14,
+    color: theme.colors.text.light,
+    fontStyle: 'italic',
   },
 });

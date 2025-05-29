@@ -9,15 +9,19 @@ import {
   Alert,
   Modal,
   TextInput,
-  RefreshControl
+  RefreshControl,
+  Platform,
+  StatusBar
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../services/supabase';
 import { theme } from '../styles/theme';
 
 export default function TeacherDashboard({ navigation }) {
   const { signOut, profile, user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [classes, setClasses] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -45,92 +49,102 @@ export default function TeacherDashboard({ navigation }) {
     }
   };
 
- const fetchClasses = async () => {
-  try {
-    // Query super simples - apenas turmas
-    const { data, error } = await supabase
-      .from('classes')
-      .select('*')
-      .eq('teacher_id', user.id)
-      .order('created_at', { ascending: false });
+  const fetchClasses = async () => {
+    try {
+      console.log('Buscando turmas para o professor:', user.id);
+      
+      // Query super simples - apenas turmas
+      const { data, error } = await supabase
+        .from('classes')
+        .select('*')
+        .eq('teacher_id', user.id)
+        .order('created_at', { ascending: false });
 
-    if (error) throw error;
+      if (error) {
+        console.error('Erro na query classes:', error);
+        throw error;
+      }
 
-    // Para cada turma, contar alunos de forma simples
-    const classesWithStudentCount = await Promise.all(
-      (data || []).map(async (classItem) => {
-        // Contar apenas quantos enrollments existem
-        const { count, error: countError } = await supabase
-          .from('enrollments')
-          .select('*', { count: 'exact', head: true })
-          .eq('class_id', classItem.id);
+      console.log('Classes encontradas:', data);
 
-        if (countError) {
-          console.error('Erro ao contar alunos:', countError);
-          return { ...classItem, enrollments: [] };
-        }
+      // Para cada turma, contar alunos de forma simples
+      const classesWithStudentCount = await Promise.all(
+        (data || []).map(async (classItem) => {
+          // Contar apenas quantos enrollments existem
+          const { count, error: countError } = await supabase
+            .from('enrollments')
+            .select('*', { count: 'exact', head: true })
+            .eq('class_id', classItem.id);
 
-        // Simular array de enrollments para manter compatibilidade
-        const mockEnrollments = Array.from({ length: count || 0 }, (_, i) => ({ id: i }));
-        
-        return { ...classItem, enrollments: mockEnrollments };
-      })
-    );
+          if (countError) {
+            console.error('Erro ao contar alunos:', countError);
+            return { ...classItem, enrollments: [] };
+          }
 
-    console.log('Classes with student count:', classesWithStudentCount);
-    setClasses(classesWithStudentCount);
-  } catch (error) {
-    console.error('Erro ao buscar turmas:', error);
-    Alert.alert('Erro', 'Não foi possível carregar suas turmas');
-  }
-};
+          console.log(`Turma ${classItem.name} tem ${count} alunos`);
 
-const fetchNotifications = async () => {
-  try {
-    // Query simples para notificações
-    const { data, error } = await supabase
-      .from('pickup_notifications')
-      .select('*')
-      .eq('teacher_id', user.id)
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false })
-      .limit(10);
+          // Simular array de enrollments para manter compatibilidade
+          const mockEnrollments = Array.from({ length: count || 0 }, (_, i) => ({ id: i }));
+          
+          return { ...classItem, enrollments: mockEnrollments };
+        })
+      );
 
-    if (error) throw error;
+      console.log('Classes with student count:', classesWithStudentCount);
+      setClasses(classesWithStudentCount);
+    } catch (error) {
+      console.error('Erro ao buscar turmas:', error);
+      Alert.alert('Erro', 'Não foi possível carregar suas turmas');
+      setClasses([]); // Set empty array on error
+    }
+  };
 
-    // Para cada notificação, buscar dados do estudante e pai separadamente
-    const notificationsWithDetails = await Promise.all(
-      (data || []).map(async (notification) => {
-        // Buscar dados do estudante
-        const { data: student } = await supabase
-          .from('students')
-          .select('name')
-          .eq('id', notification.student_id)
-          .single();
+  const fetchNotifications = async () => {
+    try {
+      // Query simples para notificações
+      const { data, error } = await supabase
+        .from('pickup_notifications')
+        .select('*')
+        .eq('teacher_id', user.id)
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false })
+        .limit(10);
 
-        // Buscar dados do pai
-        const { data: parent } = await supabase
-          .from('profiles')
-          .select('name')
-          .eq('id', notification.parent_id)
-          .single();
+      if (error) throw error;
 
-        return {
-          ...notification,
-          students: student || { name: 'Aluno não encontrado' },
-          profiles: parent || { name: 'Responsável não encontrado' }
-        };
-      })
-    );
+      // Para cada notificação, buscar dados do estudante e pai separadamente
+      const notificationsWithDetails = await Promise.all(
+        (data || []).map(async (notification) => {
+          // Buscar dados do estudante
+          const { data: student } = await supabase
+            .from('students')
+            .select('name')
+            .eq('id', notification.student_id)
+            .single();
 
-    console.log('Notifications with details:', notificationsWithDetails);
-    setNotifications(notificationsWithDetails);
-  } catch (error) {
-    console.error('Erro ao buscar notificações:', error);
-    // Não mostrar erro para notificações, pode não ter dados
-    setNotifications([]);
-  }
-};
+          // Buscar dados do pai
+          const { data: parent } = await supabase
+            .from('profiles')
+            .select('name')
+            .eq('id', notification.parent_id)
+            .single();
+
+          return {
+            ...notification,
+            students: student || { name: 'Aluno não encontrado' },
+            profiles: parent || { name: 'Responsável não encontrado' }
+          };
+        })
+      );
+
+      console.log('Notifications with details:', notificationsWithDetails);
+      setNotifications(notificationsWithDetails);
+    } catch (error) {
+      console.error('Erro ao buscar notificações:', error);
+      // Não mostrar erro para notificações, pode não ter dados
+      setNotifications([]);
+    }
+  };
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -144,6 +158,12 @@ const fetchNotifications = async () => {
     }
 
     try {
+      console.log('Criando turma:', {
+        name: newClassName.trim(),
+        teacher_id: user.id,
+        school_year: schoolYear
+      });
+
       const { data, error } = await supabase
         .from('classes')
         .insert([{
@@ -154,9 +174,14 @@ const fetchNotifications = async () => {
         }])
         .select();
 
-      if (error) throw error;
+      if (error) {
+        console.error('Erro ao criar turma:', error);
+        throw error;
+      }
 
-      if (data) {
+      console.log('Turma criada:', data);
+
+      if (data && data.length > 0) {
         // Adicionar à lista local com enrollments vazio
         const newClass = { ...data[0], enrollments: [] };
         setClasses([newClass, ...classes]);
@@ -166,43 +191,184 @@ const fetchNotifications = async () => {
       }
     } catch (error) {
       console.error('Erro ao criar turma:', error);
-      Alert.alert('Erro', 'Não foi possível criar a turma');
+      Alert.alert('Erro', `Não foi possível criar a turma: ${error.message}`);
+    }
+  };
+
+  const handleDeleteClass = async (classToDelete) => {
+    const studentCount = classToDelete.enrollments?.length || 0;
+    
+    // Primeira confirmação
+    Alert.alert(
+      'Excluir Turma',
+      `Tem certeza que deseja excluir a turma "${classToDelete.name}"?` +
+      (studentCount > 0 ? `\n\nEsta turma possui ${studentCount} aluno${studentCount > 1 ? 's' : ''} matriculado${studentCount > 1 ? 's' : ''}.` : ''),
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Continuar',
+          style: 'destructive',
+          onPress: () => {
+            // Segunda confirmação com o nome da turma
+            Alert.alert(
+              'CONFIRMAÇÃO FINAL',
+              `Digite o nome da turma para confirmar a exclusão:\n\n"${classToDelete.name}"\n\nEsta ação não pode ser desfeita!`,
+              [
+                { text: 'Cancelar', style: 'cancel' },
+                {
+                  text: 'EXCLUIR',
+                  style: 'destructive',
+                  onPress: () => confirmDeleteClass(classToDelete)
+                }
+              ]
+            );
+          }
+        }
+      ]
+    );
+  };
+
+  const confirmDeleteClass = async (classToDelete) => {
+    try {
+      console.log('Excluindo turma:', classToDelete.id);
+
+      // Versão mais robusta - fazer uma query para cada tabela separadamente
+      
+      // 1. Primeiro, excluir registros de presença (attendances)
+      console.log('Excluindo presenças...');
+      const { error: attendancesError } = await supabase
+        .from('attendances')
+        .delete()
+        .eq('class_id', classToDelete.id);
+
+      if (attendancesError) {
+        console.error('Erro ao excluir presenças:', attendancesError);
+        throw new Error(`Erro ao excluir presenças: ${attendancesError.message}`);
+      }
+
+      // 2. Buscar IDs dos estudantes da turma para excluir notificações
+      console.log('Buscando estudantes da turma...');
+      const { data: enrollments, error: enrollmentsSelectError } = await supabase
+        .from('enrollments')
+        .select('student_id')
+        .eq('class_id', classToDelete.id);
+
+      if (enrollmentsSelectError) {
+        console.error('Erro ao buscar matrículas:', enrollmentsSelectError);
+        // Continuar mesmo se não encontrar matrículas
+      }
+
+      // 3. Excluir notificações dos estudantes desta turma
+      if (enrollments && enrollments.length > 0) {
+        console.log('Excluindo notificações...');
+        const studentIds = enrollments.map(e => e.student_id);
+        
+        const { error: notificationsError } = await supabase
+          .from('pickup_notifications')
+          .delete()
+          .in('student_id', studentIds);
+
+        if (notificationsError) {
+          console.log('Aviso ao excluir notificações:', notificationsError);
+          // Continuar mesmo se não conseguir excluir notificações
+        }
+      }
+
+      // 4. Excluir matrículas (enrollments)
+      console.log('Excluindo matrículas...');
+      const { error: enrollmentsError } = await supabase
+        .from('enrollments')
+        .delete()
+        .eq('class_id', classToDelete.id);
+
+      if (enrollmentsError) {
+        console.error('Erro ao excluir matrículas:', enrollmentsError);
+        throw new Error(`Erro ao excluir matrículas: ${enrollmentsError.message}`);
+      }
+
+      // 5. Finalmente, excluir a turma
+      console.log('Excluindo turma...');
+      const { error: classError } = await supabase
+        .from('classes')
+        .delete()
+        .eq('id', classToDelete.id)
+        .eq('teacher_id', user.id);
+
+      if (classError) {
+        console.error('Erro ao excluir turma:', classError);
+        throw new Error(`Erro ao excluir turma: ${classError.message}`);
+      }
+
+      console.log('Turma excluída com sucesso!');
+
+      // Remover da lista local
+      setClasses(classes.filter(c => c.id !== classToDelete.id));
+      
+      Alert.alert(
+        'Turma Excluída ✅',
+        `A turma "${classToDelete.name}" foi excluída com sucesso!\n\nTodos os dados relacionados foram removidos.`
+      );
+
+    } catch (error) {
+      console.error('Erro completo ao excluir turma:', error);
+      Alert.alert(
+        'Erro ao Excluir Turma ❌',
+        `Não foi possível excluir a turma "${classToDelete.name}".\n\nDetalhes técnicos:\n${error.message}\n\nTente novamente em alguns minutos.`
+      );
     }
   };
 
   const confirmPickup = async (notificationId) => {
     try {
+      console.log('Confirmando busca para notificação:', notificationId);
+      
       const { error } = await supabase
         .from('pickup_notifications')
-        .update({ status: 'confirmed' })
+        .update({ 
+          status: 'confirmed'
+        })
         .eq('id', notificationId);
 
-      if (error) throw error;
+      if (error) {
+        console.error('Erro ao confirmar busca:', error);
+        throw error;
+      }
 
+      console.log('Busca confirmada com sucesso');
+      
       // Remover da lista local
       setNotifications(notifications.filter(n => n.id !== notificationId));
-      Alert.alert('Sucesso', 'Busca confirmada!');
+      Alert.alert('Sucesso', 'Busca confirmada! O responsável foi notificado.');
     } catch (error) {
       console.error('Erro ao confirmar busca:', error);
-      Alert.alert('Erro', 'Não foi possível confirmar a busca');
+      Alert.alert('Erro', `Não foi possível confirmar a busca: ${error.message}`);
     }
   };
 
   const rejectPickup = async (notificationId) => {
     try {
+      console.log('Recusando busca para notificação:', notificationId);
+      
       const { error } = await supabase
         .from('pickup_notifications')
-        .update({ status: 'cancelled' })
+        .update({ 
+          status: 'cancelled'
+        })
         .eq('id', notificationId);
 
-      if (error) throw error;
+      if (error) {
+        console.error('Erro ao recusar busca:', error);
+        throw error;
+      }
 
+      console.log('Busca recusada com sucesso');
+      
       // Remover da lista local
       setNotifications(notifications.filter(n => n.id !== notificationId));
-      Alert.alert('Busca recusada', 'A solicitação foi recusada.');
+      Alert.alert('Busca recusada', 'A solicitação foi recusada. O responsável foi notificado.');
     } catch (error) {
       console.error('Erro ao recusar busca:', error);
-      Alert.alert('Erro', 'Não foi possível recusar a busca');
+      Alert.alert('Erro', `Não foi possível recusar a busca: ${error.message}`);
     }
   };
 
@@ -223,22 +389,85 @@ const fetchNotifications = async () => {
     );
   };
 
- const renderClassCard = (classItem) => {
-  const studentCount = classItem.enrollments?.length || 0;
+  // FUNÇÃO RENDERCLASSCARD COMPLETA CORRIGIDA
+  const renderClassCard = (classItem) => {
+    const studentCount = classItem.enrollments?.length || 0;
 
-  return (
-    <TouchableOpacity 
-      key={classItem.id} 
-      style={styles.classCard}
-      onPress={() => navigation.navigate('ClassDetails', {
-        classId: classItem.id,
-        className: classItem.name
-      })}
-    >
-      {/* resto do código igual */}
-    </TouchableOpacity>
-  );
-};
+    return (
+      <TouchableOpacity 
+        key={classItem.id} 
+        style={styles.classCard}
+        onPress={() => {
+          console.log('Navegando para ClassDetails com:', {
+            classId: classItem.id,
+            className: classItem.name
+          });
+          navigation.navigate('ClassDetails', {
+            classId: classItem.id,
+            className: classItem.name
+          });
+        }}
+      >
+        <View style={styles.classHeader}>
+          <View style={styles.classIcon}>
+            <Ionicons name="school" size={24} color={theme.colors.primary} />
+          </View>
+          <View style={styles.classInfo}>
+            <Text style={styles.className}>{classItem.name}</Text>
+            <Text style={styles.classYear}>Ano: {classItem.school_year}</Text>
+            {classItem.school_unit && (
+              <Text style={styles.schoolUnit}>Unidade: {classItem.school_unit}</Text>
+            )}
+          </View>
+          <View style={styles.studentCount}>
+            <Text style={styles.studentCountNumber}>{studentCount}</Text>
+            <Text style={styles.studentCountLabel}>
+              {studentCount === 1 ? 'aluno' : 'alunos'}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.classActions}>
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={(e) => {
+              e.stopPropagation(); // Evita navegação dupla
+              console.log('Chamada clicada para turma:', classItem.name);
+              navigation.navigate('ClassDetails', {
+                classId: classItem.id,
+                className: classItem.name
+              });
+            }}
+          >
+            <Ionicons name="list" size={20} color={theme.colors.primary} />
+            <Text style={styles.actionButtonText}>Ver Chamada</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.actionButton}
+            onPress={(e) => {
+              e.stopPropagation();
+              Alert.alert('Em breve', 'Funcionalidade de mensagens será implementada!');
+            }}
+          >
+            <Ionicons name="chatbubbles" size={20} color={theme.colors.text.secondary} />
+            <Text style={styles.actionButtonText}>Mensagens</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[styles.actionButton, styles.deleteButton]}
+            onPress={(e) => {
+              e.stopPropagation();
+              handleDeleteClass(classItem);
+            }}
+          >
+            <Ionicons name="trash" size={20} color={theme.colors.error} />
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
   const renderNotificationCard = (notification) => {
     const formatTime = (dateString) => {
       const date = new Date(dateString);
@@ -296,13 +525,31 @@ const fetchNotifications = async () => {
 
   const totalStudents = classes.reduce((total, c) => total + (c.enrollments?.length || 0), 0);
 
+  // DEBUG: Log dos dados para ajudar a identificar problemas
+  console.log('=== TEACHER DASHBOARD DEBUG ===');
+  console.log('User ID:', user?.id);
+  console.log('Profile:', profile);
+  console.log('Classes:', classes);
+  console.log('Loading:', loading);
+
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
+    <View style={styles.container}>
+      {/* Status Bar - Configuração para o gradiente funcionar */}
+      <StatusBar 
+        barStyle="light-content" 
+        backgroundColor={theme.colors.primary}
+        translucent={false}
+      />
+      
+      {/* Header com Safe Area customizada */}
+      <View style={[styles.header, { 
+        paddingTop: Math.max(insets.top, Platform.OS === 'ios' ? 44 : 24) + 12 
+      }]}>
         <View style={styles.headerContent}>
-          <View>
-            <Text style={styles.greeting}>Prof. {profile?.name}! 👩‍🏫</Text>
+          <View style={styles.greetingContainer}>
+            <Text style={styles.greeting} numberOfLines={1} adjustsFontSizeToFit>
+              Prof. {profile?.name}! 👩‍🏫
+            </Text>
             <Text style={styles.subGreeting}>Gerencie suas turmas</Text>
           </View>
           <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
@@ -317,6 +564,7 @@ const fetchNotifications = async () => {
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
+        showsVerticalScrollIndicator={false}
       >
         {/* Resumo rápido */}
         <View style={styles.summaryContainer}>
@@ -370,11 +618,20 @@ const fetchNotifications = async () => {
               <Text style={styles.emptyStateText}>
                 Crie sua primeira turma para começar
               </Text>
+              <TouchableOpacity
+                style={styles.createFirstClassButton}
+                onPress={() => setModalVisible(true)}
+              >
+                <Text style={styles.createFirstClassText}>Criar Primeira Turma</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             classes.map(renderClassCard)
           )}
         </View>
+
+        {/* Espaço extra no final para scroll confortável */}
+        <View style={styles.bottomSpacing} />
       </ScrollView>
 
       {/* Modal para adicionar turma */}
@@ -430,7 +687,7 @@ const fetchNotifications = async () => {
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -441,32 +698,55 @@ const styles = StyleSheet.create({
   },
   header: {
     backgroundColor: theme.colors.primary,
-    paddingTop: theme.spacing.md,
     paddingBottom: theme.spacing.lg,
     paddingHorizontal: theme.spacing.lg,
+    // Sombra para destacar do conteúdo
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 4,
   },
   headerContent: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  greetingContainer: {
+    flex: 1,
+    marginRight: theme.spacing.md,
+  },
   greeting: {
     color: 'white',
     fontSize: 20,
     fontWeight: 'bold',
+    // Garantir que o texto seja legível
+    textShadowColor: 'rgba(0, 0, 0, 0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   subGreeting: {
     color: 'white',
     opacity: 0.9,
     marginTop: 4,
+    fontSize: 14,
+    textShadowColor: 'rgba(0, 0, 0, 0.2)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 1,
   },
   profileButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
+    // Pequena sombra para destaque
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   content: {
     flex: 1,
@@ -516,12 +796,17 @@ const styles = StyleSheet.create({
     color: theme.colors.text.primary,
   },
   addButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: theme.colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   classCard: {
     backgroundColor: 'white',
@@ -584,15 +869,31 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: theme.colors.border,
     paddingTop: theme.spacing.md,
+    gap: theme.spacing.sm,
   },
   actionButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.sm,
+    gap: theme.spacing.xs,
+    paddingVertical: theme.spacing.xs,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.borderRadius.sm,
+  },
+  deleteButton: {
+    backgroundColor: 'rgba(239, 68, 68, 0.1)', // Fundo vermelho claro
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   actionButtonText: {
     color: theme.colors.text.secondary,
     fontSize: 14,
+  },
+  deleteButtonText: {
+    color: theme.colors.error,
+    fontWeight: '600',
   },
   notificationCard: {
     backgroundColor: 'white',
@@ -651,7 +952,7 @@ const styles = StyleSheet.create({
   },
   confirmButtonText: {
     color: 'white',
-    fontWeight: '600',
+    fontweight: '600',
   },
   rejectButton: {
     flex: 1,
@@ -687,6 +988,18 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: theme.spacing.sm,
     lineHeight: 20,
+    marginBottom: theme.spacing.lg,
+  },
+  createFirstClassButton: {
+    backgroundColor: theme.colors.primary,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+  },
+  createFirstClassText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 16,
   },
   modalContainer: {
     flex: 1,
@@ -755,5 +1068,8 @@ const styles = StyleSheet.create({
   createButtonText: {
     color: 'white',
     fontWeight: '600',
+  },
+  bottomSpacing: {
+    height: theme.spacing.xl,
   },
 });

@@ -7,74 +7,138 @@ import {
   TouchableOpacity,
   SafeAreaView,
   Alert,
-  RefreshControl
+  RefreshControl,
+  ActivityIndicator,
+  Platform,
+  StatusBar
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../services/supabase';
 import { theme } from '../styles/theme';
 
 export default function ParentDashboard({ navigation }) {
   const { signOut, profile, user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [sendingNotification, setSendingNotification] = useState(null);
 
   useEffect(() => {
     fetchStudents();
   }, []);
 
   const fetchStudents = async () => {
-  try {
-    setLoading(true);
-    
-    // Query corrigida - buscar estudantes com suas matrículas e turmas
-    const { data: studentsData, error: studentsError } = await supabase
-      .from('students')
-      .select('*')
-      .eq('parent_id', user.id)
-      .eq('active', true);
+    try {
+      setLoading(true);
+      console.log('Buscando filhos do responsável:', user.id);
+      
+      // Buscar filhos do responsável logado
+      const { data: studentsData, error: studentsError } = await supabase
+        .from('students')
+        .select('*')
+        .eq('parent_id', user.id)
+        .eq('active', true);
 
-    if (studentsError) throw studentsError;
+      if (studentsError) {
+        console.error('Erro ao buscar estudantes:', studentsError);
+        throw studentsError;
+      }
 
-    // Para cada estudante, buscar suas matrículas e turmas
-    const studentsWithEnrollments = await Promise.all(
-      (studentsData || []).map(async (student) => {
-        const { data: enrollments, error: enrollmentError } = await supabase
-          .from('enrollments')
-          .select(`
-            id,
-            status,
-            classes (
-              id,
-              name,
-              teacher_id,
-              profiles (
-                name
-              )
-            )
-          `)
-          .eq('student_id', student.id);
+      console.log('Filhos encontrados:', studentsData);
 
-        if (enrollmentError) {
-          console.error('Erro ao buscar matrículas:', enrollmentError);
-          return { ...student, enrollments: [] };
-        }
+      if (!studentsData || studentsData.length === 0) {
+        console.log('Nenhum filho encontrado');
+        setStudents([]);
+        return;
+      }
 
-        return { ...student, enrollments: enrollments || [] };
-      })
-    );
+      const studentsWithDetails = await Promise.all(
+        studentsData.map(async (student) => {
+          try {
+            const { data: enrollment, error: enrollmentError } = await supabase
+              .from('enrollments')
+              .select('class_id, status')
+              .eq('student_id', student.id)
+              .eq('status', 'active')
+              .single();
 
-    console.log('Students with enrollments:', studentsWithEnrollments);
-    setStudents(studentsWithEnrollments);
-  } catch (error) {
-    console.error('Erro ao buscar estudantes:', error);
-    Alert.alert('Erro', 'Não foi possível carregar os dados dos estudantes');
-  } finally {
-    setLoading(false);
-    setRefreshing(false);
-  }
-};
+            if (enrollmentError) {
+              console.log('Erro ao buscar matrícula para', student.name, ':', enrollmentError);
+              return {
+                ...student,
+                className: 'Sem turma',
+                teacherName: 'Sem professor',
+                teacherId: null,
+                attendanceStatus: 'inactive',
+                classId: null
+              };
+            }
+
+            // Buscar dados da turma
+            const { data: classData, error: classError } = await supabase
+              .from('classes')
+              .select('id, name, teacher_id, school_year')
+              .eq('id', enrollment.class_id)
+              .single();
+
+            if (classError) {
+              console.log('Erro ao buscar turma:', classError);
+              return {
+                ...student,
+                className: 'Sem turma',
+                teacherName: 'Sem professor',
+                teacherId: null,
+                attendanceStatus: enrollment.status || 'active',
+                classId: null
+              };
+            }
+
+            // Buscar dados do professor
+            const { data: teacherData, error: teacherError } = await supabase
+              .from('profiles')
+              .select('name')
+              .eq('id', classData.teacher_id)
+              .single();
+
+            return {
+              ...student,
+              className: classData.name,
+              schoolYear: classData.school_year,
+              teacherName: teacherData?.name || 'Professor não encontrado',
+              teacherId: classData.teacher_id,
+              attendanceStatus: enrollment.status || 'active',
+              classId: classData.id
+            };
+
+          } catch (error) {
+            console.error('Erro ao processar estudante:', error);
+            return {
+              ...student,
+              className: 'Erro ao carregar',
+              teacherName: 'Erro ao carregar',
+              teacherId: null,
+              attendanceStatus: 'inactive',
+              classId: null
+            };
+          }
+        })
+      );
+
+      console.log('Estudantes com detalhes:', studentsWithDetails);
+      setStudents(studentsWithDetails);
+
+    } catch (error) {
+      console.error('Erro geral ao buscar estudantes:', error);
+      Alert.alert('Erro', `Não foi possível carregar os dados dos filhos: ${error.message}`);
+      setStudents([]);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -82,39 +146,47 @@ export default function ParentDashboard({ navigation }) {
   };
 
   const sendPickupNotification = async (student) => {
-    // Encontrar a turma ativa do aluno
-    const activeEnrollment = student.enrollments?.find(e => e.status === 'active');
-    
-    if (!activeEnrollment) {
-      Alert.alert('Erro', 'Aluno não está matriculado em nenhuma turma ativa');
+    if (!student.teacherId || !student.classId) {
+      Alert.alert('Erro', 'Não foi possível enviar notificação. Dados do professor não encontrados.');
       return;
     }
 
     Alert.alert(
       'Notificar Busca',
-      `Deseja notificar o professor que irá buscar ${student.name}?`,
+      `Deseja notificar o(a) professor(a) ${student.teacherName} que irá buscar ${student.name}?`,
       [
         { text: 'Cancelar', style: 'cancel' },
         {
           text: 'Confirmar',
           onPress: async () => {
             try {
+              setSendingNotification(student.id);
+              
               const { error } = await supabase
                 .from('pickup_notifications')
                 .insert({
                   student_id: student.id,
                   parent_id: user.id,
-                  teacher_id: activeEnrollment.classes.teacher_id,
+                  teacher_id: student.teacherId,
                   pickup_time: new Date().toISOString(),
-                  reason: 'Busca solicitada pelo responsável'
+                  reason: 'Busca solicitada pelo responsável',
+                  status: 'pending'
                 });
 
-              if (error) throw error;
+              if (error) {
+                console.error('Erro ao enviar notificação:', error);
+                throw error;
+              }
 
-              Alert.alert('Sucesso', 'Notificação enviada para o professor!');
+              Alert.alert(
+                'Sucesso!', 
+                `Notificação enviada para ${student.teacherName}. O professor será avisado que você irá buscar ${student.name}.`
+              );
             } catch (error) {
               console.error('Erro ao enviar notificação:', error);
-              Alert.alert('Erro', 'Não foi possível enviar a notificação');
+              Alert.alert('Erro', 'Não foi possível enviar a notificação. Tente novamente.');
+            } finally {
+              setSendingNotification(null);
             }
           }
         }
@@ -139,41 +211,82 @@ export default function ParentDashboard({ navigation }) {
     );
   };
 
-  const renderStudentCard = (student) => {
-    const activeEnrollment = student.enrollments?.find(e => e.status === 'active');
-    const className = activeEnrollment?.classes?.name || 'Sem turma';
-    const teacherName = activeEnrollment?.classes?.profiles?.name || 'Professor não definido';
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'present': return theme.colors.success;
+      case 'absent': return theme.colors.error;
+      case 'active': return theme.colors.primary;
+      default: return theme.colors.text.light;
+    }
+  };
 
+  const getStatusText = (status) => {
+    switch (status) {
+      case 'present': return 'Presente';
+      case 'absent': return 'Ausente';
+      case 'active': return 'Ativo';
+      default: return 'Inativo';
+    }
+  };
+
+  const renderStudentCard = (student) => {
     return (
       <View key={student.id} style={styles.childCard}>
         <View style={styles.childHeader}>
           <View style={styles.avatarContainer}>
-            <Ionicons name="person" size={24} color={theme.colors.primary} />
+            <Ionicons name="person" size={28} color={theme.colors.primary} />
           </View>
           <View style={styles.childInfo}>
             <Text style={styles.childName}>{student.name}</Text>
-            <Text style={styles.className}>Turma: {className}</Text>
-            <Text style={styles.teacherName}>Prof: {teacherName}</Text>
+            <Text style={styles.className}>
+              <Ionicons name="school" size={14} color={theme.colors.text.secondary} />
+              {' '}Turma: {student.className}
+            </Text>
+            <Text style={styles.teacherName}>
+              <Ionicons name="person-circle" size={14} color={theme.colors.text.secondary} />
+              {' '}Prof: {student.teacherName}
+            </Text>
+            {student.schoolYear && (
+              <Text style={styles.schoolYear}>
+                <Ionicons name="calendar" size={14} color={theme.colors.text.light} />
+                {' '}Ano: {student.schoolYear}
+              </Text>
+            )}
           </View>
           <View style={styles.statusContainer}>
-            <View style={[styles.statusBadge, styles.presentBadge]}>
-              <Text style={styles.statusText}>Presente</Text>
+            <View style={[
+              styles.statusBadge, 
+              { backgroundColor: getStatusColor(student.attendanceStatus) }
+            ]}>
+              <Text style={styles.statusText}>{getStatusText(student.attendanceStatus)}</Text>
             </View>
           </View>
         </View>
 
         <View style={styles.cardActions}>
           <TouchableOpacity
-            style={styles.actionButton}
+            style={[styles.actionButton, styles.primaryAction]}
             onPress={() => sendPickupNotification(student)}
+            disabled={sendingNotification === student.id || !student.teacherId}
           >
-            <Ionicons name="car" size={20} color={theme.colors.primary} />
-            <Text style={styles.actionButtonText}>Notificar Busca</Text>
+            {sendingNotification === student.id ? (
+              <ActivityIndicator size="small" color="white" />
+            ) : (
+              <Ionicons name="car" size={18} color="white" />
+            )}
+            <Text style={styles.primaryActionText}>
+              {sendingNotification === student.id ? 'Enviando...' : 'Notificar Busca'}
+            </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.actionButton}>
-            <Ionicons name="calendar" size={20} color={theme.colors.text.secondary} />
-            <Text style={styles.actionButtonText}>Ver Presença</Text>
+          <TouchableOpacity 
+            style={[styles.actionButton, styles.secondaryAction]}
+            onPress={() => {
+              Alert.alert('Em breve', 'Histórico de presença será implementado em breve!');
+            }}
+          >
+            <Ionicons name="calendar" size={18} color={theme.colors.text.secondary} />
+            <Text style={styles.secondaryActionText}>Ver Histórico</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -181,12 +294,23 @@ export default function ParentDashboard({ navigation }) {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
+    <View style={styles.container}>
+      {/* Status Bar - Configuração para o gradiente funcionar */}
+      <StatusBar 
+        barStyle="light-content" 
+        backgroundColor={theme.colors.primary}
+        translucent={false}
+      />
+      
+      {/* Header com Safe Area customizada */}
+      <View style={[styles.header, { 
+        paddingTop: Math.max(insets.top, Platform.OS === 'ios' ? 44 : 24) + 12 
+      }]}>
         <View style={styles.headerContent}>
-          <View>
-            <Text style={styles.greeting}>Olá, {profile?.name}! 👋</Text>
+          <View style={styles.greetingContainer}>
+            <Text style={styles.greeting} numberOfLines={1} adjustsFontSizeToFit>
+              Olá, {profile?.name}! 👋
+            </Text>
             <Text style={styles.subGreeting}>Acompanhe seus filhos</Text>
           </View>
           <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
@@ -201,6 +325,7 @@ export default function ParentDashboard({ navigation }) {
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
+        showsVerticalScrollIndicator={false}
       >
         {/* Resumo rápido */}
         <View style={styles.summaryContainer}>
@@ -213,15 +338,17 @@ export default function ParentDashboard({ navigation }) {
           <View style={styles.summaryCard}>
             <Ionicons name="checkmark-circle" size={24} color={theme.colors.success} />
             <Text style={styles.summaryNumber}>
-              {students.filter(s => s.enrollments?.some(e => e.status === 'active')).length}
+              {students.filter(s => s.attendanceStatus === 'present').length}
             </Text>
             <Text style={styles.summaryLabel}>Presentes</Text>
           </View>
 
           <View style={styles.summaryCard}>
-            <Ionicons name="notifications" size={24} color={theme.colors.warning} />
-            <Text style={styles.summaryNumber}>0</Text>
-            <Text style={styles.summaryLabel}>Alertas</Text>
+            <Ionicons name="school" size={24} color={theme.colors.secondary} />
+            <Text style={styles.summaryNumber}>
+              {students.filter(s => s.classId).length}
+            </Text>
+            <Text style={styles.summaryLabel}>Matriculados</Text>
           </View>
         </View>
 
@@ -231,15 +358,23 @@ export default function ParentDashboard({ navigation }) {
           
           {loading ? (
             <View style={styles.loadingContainer}>
-              <Text style={styles.loadingText}>Carregando...</Text>
+              <ActivityIndicator size="large" color={theme.colors.primary} />
+              <Text style={styles.loadingText}>Carregando dados dos filhos...</Text>
             </View>
           ) : students.length === 0 ? (
             <View style={styles.emptyState}>
               <Ionicons name="people-outline" size={64} color={theme.colors.text.light} />
               <Text style={styles.emptyStateTitle}>Nenhum filho cadastrado</Text>
               <Text style={styles.emptyStateText}>
-                Entre em contato com a escola para cadastrar seus filhos
+                Entre em contato com a escola para cadastrar seus filhos ou verifique se eles já foram vinculados pelo professor.
               </Text>
+              <TouchableOpacity
+                style={styles.refreshButton}
+                onPress={onRefresh}
+              >
+                <Ionicons name="refresh" size={20} color="white" />
+                <Text style={styles.refreshButtonText}>Atualizar</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             students.map(renderStudentCard)
@@ -247,28 +382,60 @@ export default function ParentDashboard({ navigation }) {
         </View>
 
         {/* Ações rápidas */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Ações Rápidas</Text>
-          
-          <View style={styles.quickActions}>
-            <TouchableOpacity style={styles.quickActionCard}>
-              <Ionicons name="chatbubbles" size={32} color={theme.colors.primary} />
-              <Text style={styles.quickActionText}>Chat com Professor</Text>
-            </TouchableOpacity>
+        {students.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Ações Rápidas</Text>
+            
+            <View style={styles.quickActions}>
+              <TouchableOpacity 
+                style={styles.quickActionCard}
+                onPress={() => {
+                  if (students.length === 1) {
+                    sendPickupNotification(students[0]);
+                  } else {
+                    Alert.alert(
+                      'Escolher Filho',
+                      'Para qual filho você gostaria de enviar notificação de busca?',
+                      [
+                        { text: 'Cancelar', style: 'cancel' },
+                        ...students.map(student => ({
+                          text: student.name,
+                          onPress: () => sendPickupNotification(student)
+                        }))
+                      ]
+                    );
+                  }
+                }}
+              >
+                <Ionicons name="car" size={32} color={theme.colors.primary} />
+                <Text style={styles.quickActionText}>Notificar Busca</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.quickActionCard}>
-              <Ionicons name="calendar" size={32} color={theme.colors.secondary} />
-              <Text style={styles.quickActionText}>Histórico</Text>
-            </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.quickActionCard}
+                onPress={() => onRefresh()}
+              >
+                <Ionicons name="refresh-circle" size={32} color={theme.colors.success} />
+                <Text style={styles.quickActionText}>Atualizar Dados</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.quickActionCard}>
-              <Ionicons name="settings" size={32} color={theme.colors.text.secondary} />
-              <Text style={styles.quickActionText}>Configurações</Text>
-            </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.quickActionCard}
+                onPress={() => {
+                  Alert.alert('Em breve', 'Chat com professores será implementado em breve!');
+                }}
+              >
+                <Ionicons name="chatbubbles" size={32} color={theme.colors.secondary} />
+                <Text style={styles.quickActionText}>Chat Professor</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        )}
+
+        {/* Espaço extra no final para scroll confortável */}
+        <View style={styles.bottomSpacing} />
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -279,32 +446,55 @@ const styles = StyleSheet.create({
   },
   header: {
     backgroundColor: theme.colors.primary,
-    paddingTop: theme.spacing.md,
     paddingBottom: theme.spacing.lg,
     paddingHorizontal: theme.spacing.lg,
+    // Sombra para destacar do conteúdo
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 4,
   },
   headerContent: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  greetingContainer: {
+    flex: 1,
+    marginRight: theme.spacing.md,
+  },
   greeting: {
     color: 'white',
     fontSize: 20,
     fontWeight: 'bold',
+    // Garantir que o texto seja legível
+    textShadowColor: 'rgba(0, 0, 0, 0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   subGreeting: {
     color: 'white',
     opacity: 0.9,
     marginTop: 4,
+    fontSize: 14,
+    textShadowColor: 'rgba(0, 0, 0, 0.2)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 1,
   },
   profileButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
+    // Pequena sombra para destaque
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   content: {
     flex: 1,
@@ -353,13 +543,13 @@ const styles = StyleSheet.create({
   },
   childHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     marginBottom: theme.spacing.md,
   },
   avatarContainer: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     backgroundColor: theme.colors.background,
     justifyContent: 'center',
     alignItems: 'center',
@@ -369,19 +559,24 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   childName: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: 'bold',
     color: theme.colors.text.primary,
+    marginBottom: 4,
   },
   className: {
     fontSize: 14,
     color: theme.colors.text.secondary,
-    marginTop: 2,
+    marginBottom: 2,
   },
   teacherName: {
+    fontSize: 14,
+    color: theme.colors.text.secondary,
+    marginBottom: 2,
+  },
+  schoolYear: {
     fontSize: 12,
     color: theme.colors.text.light,
-    marginTop: 2,
   },
   statusContainer: {
     alignItems: 'flex-end',
@@ -391,9 +586,6 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 12,
   },
-  presentBadge: {
-    backgroundColor: theme.colors.success,
-  },
   statusText: {
     color: 'white',
     fontSize: 12,
@@ -401,17 +593,34 @@ const styles = StyleSheet.create({
   },
   cardActions: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    gap: theme.spacing.md,
     borderTopWidth: 1,
     borderTopColor: theme.colors.border,
     paddingTop: theme.spacing.md,
   },
   actionButton: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.sm,
+    justifyContent: 'center',
+    padding: theme.spacing.sm,
+    borderRadius: theme.borderRadius.md,
+    gap: theme.spacing.xs,
   },
-  actionButtonText: {
+  primaryAction: {
+    backgroundColor: theme.colors.primary,
+  },
+  secondaryAction: {
+    backgroundColor: theme.colors.background,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  primaryActionText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  secondaryActionText: {
     color: theme.colors.text.secondary,
     fontSize: 14,
   },
@@ -440,6 +649,7 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     color: theme.colors.text.secondary,
+    marginTop: theme.spacing.md,
   },
   emptyState: {
     alignItems: 'center',
@@ -457,5 +667,22 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: theme.spacing.sm,
     lineHeight: 20,
+    marginBottom: theme.spacing.lg,
+  },
+  refreshButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.colors.primary,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    gap: theme.spacing.sm,
+  },
+  refreshButtonText: {
+    color: 'white',
+    fontWeight: '600',
+  },
+  bottomSpacing: {
+    height: theme.spacing.xl,
   },
 });
