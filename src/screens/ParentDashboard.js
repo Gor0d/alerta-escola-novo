@@ -25,15 +25,17 @@ export default function ParentDashboard({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [sendingNotification, setSendingNotification] = useState(null);
+  const [deletingStudent, setDeletingStudent] = useState(null);
 
-  useEffect(() => {
-    fetchStudents();
-  }, []);
+useEffect(() => {
+  fetchStudents();
+}, []);
 
   const fetchStudents = async () => {
     try {
       setLoading(true);
-      console.log('Buscando filhos do responsável:', user.id);
+      console.log('=== BUSCANDO FILHOS DO RESPONSÁVEL ===');
+      console.log('Parent ID:', user.id);
       
       // Buscar filhos do responsável logado
       const { data: studentsData, error: studentsError } = await supabase
@@ -47,7 +49,7 @@ export default function ParentDashboard({ navigation }) {
         throw studentsError;
       }
 
-      console.log('Filhos encontrados:', studentsData);
+      console.log('✅ Filhos encontrados:', studentsData);
 
       if (!studentsData || studentsData.length === 0) {
         console.log('Nenhum filho encontrado');
@@ -58,24 +60,49 @@ export default function ParentDashboard({ navigation }) {
       const studentsWithDetails = await Promise.all(
         studentsData.map(async (student) => {
           try {
+            console.log(`=== PROCESSANDO ALUNO: ${student.name} ===`);
+            
+            // CORREÇÃO: Buscar enrollment sem filtrar por status específico
+            // Aceitar qualquer status válido de matrícula
             const { data: enrollment, error: enrollmentError } = await supabase
               .from('enrollments')
               .select('class_id, status')
               .eq('student_id', student.id)
-              .eq('status', 'active')
+              // REMOVIDO: .eq('status', 'active') 
+              // ADICIONADO: Filtro mais amplo para status válidos
+              .in('status', ['active', 'present', 'absent', 'enrolled'])
               .single();
 
             if (enrollmentError) {
-              console.log('Erro ao buscar matrícula para', student.name, ':', enrollmentError);
-              return {
-                ...student,
-                className: 'Sem turma',
-                teacherName: 'Sem professor',
-                teacherId: null,
-                attendanceStatus: 'inactive',
-                classId: null
-              };
+              console.log(`❌ Erro ao buscar matrícula para ${student.name}:`, enrollmentError);
+              
+              // Tentar buscar qualquer enrollment, independente do status
+              const { data: anyEnrollment, error: anyError } = await supabase
+                .from('enrollments')
+                .select('class_id, status')
+                .eq('student_id', student.id)
+                .limit(1)
+                .single();
+              
+              if (anyError || !anyEnrollment) {
+                console.log(`❌ Nenhuma matrícula encontrada para ${student.name}`);
+                return {
+                  ...student,
+                  className: 'Sem turma',
+                  teacherName: 'Sem professor',
+                  teacherId: null,
+                  attendanceStatus: 'inactive',
+                  classId: null,
+                  canDelete: true // NOVO: Permitir exclusão quando não tem turma
+                };
+              }
+              
+              console.log(`⚠️ Matrícula encontrada com status: ${anyEnrollment.status}`);
+              // Usar a matrícula encontrada, mesmo com status diferente
+              enrollment = anyEnrollment;
             }
+
+            console.log(`✅ Matrícula encontrada para ${student.name}:`, enrollment);
 
             // Buscar dados da turma
             const { data: classData, error: classError } = await supabase
@@ -85,16 +112,19 @@ export default function ParentDashboard({ navigation }) {
               .single();
 
             if (classError) {
-              console.log('Erro ao buscar turma:', classError);
+              console.log(`❌ Erro ao buscar turma:`, classError);
               return {
                 ...student,
                 className: 'Sem turma',
                 teacherName: 'Sem professor',
                 teacherId: null,
                 attendanceStatus: enrollment.status || 'active',
-                classId: null
+                classId: null,
+                canDelete: true // NOVO: Permitir exclusão quando não tem turma válida
               };
             }
+
+            console.log(`✅ Turma encontrada:`, classData);
 
             // Buscar dados do professor
             const { data: teacherData, error: teacherError } = await supabase
@@ -103,35 +133,45 @@ export default function ParentDashboard({ navigation }) {
               .eq('id', classData.teacher_id)
               .single();
 
-            return {
+            if (teacherError) {
+              console.log(`❌ Erro ao buscar professor:`, teacherError);
+            }
+
+            const result = {
               ...student,
               className: classData.name,
               schoolYear: classData.school_year,
               teacherName: teacherData?.name || 'Professor não encontrado',
               teacherId: classData.teacher_id,
               attendanceStatus: enrollment.status || 'active',
-              classId: classData.id
+              classId: classData.id,
+              canDelete: false // NOVO: NÃO permitir exclusão quando tem turma ativa
             };
 
+            console.log(`✅ Dados finais para ${student.name}:`, result);
+            return result;
+
           } catch (error) {
-            console.error('Erro ao processar estudante:', error);
+            console.error(`❌ Erro ao processar estudante ${student.name}:`, error);
             return {
               ...student,
               className: 'Erro ao carregar',
               teacherName: 'Erro ao carregar',
               teacherId: null,
               attendanceStatus: 'inactive',
-              classId: null
+              classId: null,
+              canDelete: true // NOVO: Permitir exclusão em caso de erro
             };
           }
         })
       );
 
+      console.log('=== RESULTADO FINAL ===');
       console.log('Estudantes com detalhes:', studentsWithDetails);
       setStudents(studentsWithDetails);
 
     } catch (error) {
-      console.error('Erro geral ao buscar estudantes:', error);
+      console.error('❌ Erro geral ao buscar estudantes:', error);
       Alert.alert('Erro', `Não foi possível carregar os dados dos filhos: ${error.message}`);
       setStudents([]);
     } finally {
@@ -194,6 +234,112 @@ export default function ParentDashboard({ navigation }) {
     );
   };
 
+  // NOVA FUNÇÃO: Excluir aluno do perfil do responsável
+  const deleteStudent = async (student) => {
+    Alert.alert(
+      'Remover Filho',
+      `Tem certeza que deseja remover ${student.name} do seu perfil?\n\n⚠️ ATENÇÃO: Esta ação não pode ser desfeita! Você precisará entrar em contato com a escola novamente para re-vincular seu filho.`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Confirmar Remoção',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setDeletingStudent(student.id);
+              console.log(`=== REMOVENDO ALUNO ${student.name} ===`);
+              
+              // PRIMEIRO: Limpar todas as dependências do aluno
+              
+              // 1. Remover notificações de busca relacionadas ao aluno
+              const { error: pickupError } = await supabase
+                .from('pickup_notifications')
+                .delete()
+                .eq('student_id', student.id);
+              
+              if (pickupError) {
+                console.log('Aviso: Erro ao limpar notificações de busca:', pickupError);
+                // Não bloquear por isso, continuar tentando outras limpezas
+              }
+              
+              // 2. Remover matrículas (enrollments)
+              const { error: enrollmentError } = await supabase
+                .from('enrollments')
+                .delete()
+                .eq('student_id', student.id);
+              
+              if (enrollmentError) {
+                console.log('Aviso: Erro ao limpar matrículas:', enrollmentError);
+                // Não bloquear por isso, continuar
+              }
+              
+              // 3. Remover mensagens relacionadas (se existir)
+              const { error: messagesError } = await supabase
+                .from('messages')
+                .delete()
+                .eq('student_id', student.id);
+              
+              if (messagesError) {
+                console.log('Aviso: Erro ao limpar mensagens:', messagesError);
+                // Não é crítico, continuar
+              }
+              
+              // 4. Remover conversas relacionadas (se existir)
+              const { error: conversationsError } = await supabase
+                .from('conversations')
+                .delete()
+                .eq('student_id', student.id);
+              
+              if (conversationsError) {
+                console.log('Aviso: Erro ao limpar conversas:', conversationsError);
+                // Não é crítico, continuar
+              }
+              
+              // 5. Remover presenças/faltas (se existir)
+              const { error: attendancesError } = await supabase
+                .from('attendances')
+                .delete()
+                .eq('student_id', student.id);
+              
+              if (attendancesError) {
+                console.log('Aviso: Erro ao limpar presenças:', attendancesError);
+                // Não é crítico, continuar
+              }
+              
+              // FINALMENTE: Deletar o aluno (agora sem dependências)
+              const { error: deleteError } = await supabase
+                .from('students')
+                .delete()
+                .eq('id', student.id)
+                .eq('parent_id', user.id); // Garantir que só o responsável pode remover
+
+              if (deleteError) {
+                console.error('Erro ao deletar aluno:', deleteError);
+                throw deleteError;
+              }
+
+              console.log(`✅ Aluno ${student.name} removido com sucesso`);
+              
+              // Atualizar a lista local (remover da UI)
+              setStudents(students.filter(s => s.id !== student.id));
+
+              Alert.alert(
+                'Removido!', 
+                `${student.name} foi removido do seu perfil.\n\nPara vincular novamente, entre em contato com a escola.`
+              );
+
+            } catch (error) {
+              console.error('Erro ao remover aluno:', error);
+              Alert.alert('Erro', 'Não foi possível remover o aluno. Tente novamente.');
+            } finally {
+              setDeletingStudent(null);
+            }
+          }
+        }
+      ]
+    );
+  };
+
   const handleLogout = async () => {
     Alert.alert(
       'Sair',
@@ -216,6 +362,9 @@ export default function ParentDashboard({ navigation }) {
       case 'present': return theme.colors.success;
       case 'absent': return theme.colors.error;
       case 'active': return theme.colors.primary;
+      case 'enrolled': return theme.colors.primary;
+      case 'inactive': return theme.colors.text.light;
+      case 'removed': return theme.colors.warning;
       default: return theme.colors.text.light;
     }
   };
@@ -225,31 +374,79 @@ export default function ParentDashboard({ navigation }) {
       case 'present': return 'Presente';
       case 'absent': return 'Ausente';
       case 'active': return 'Ativo';
-      default: return 'Inativo';
+      case 'enrolled': return 'Matriculado';
+      case 'inactive': return 'Sem Turma';
+      case 'removed': return 'Desvinculado';
+      default: return 'Sem Turma';
     }
   };
 
   const renderStudentCard = (student) => {
+    const hasActiveEnrollment = student.classId && student.teacherId;
+    const canDelete = student.canDelete && !hasActiveEnrollment;
+    
     return (
-      <View key={student.id} style={styles.childCard}>
+      <View key={student.id} style={[
+        styles.childCard, 
+        !hasActiveEnrollment && styles.childCardInactive
+      ]}>
         <View style={styles.childHeader}>
-          <View style={styles.avatarContainer}>
-            <Ionicons name="person" size={28} color={theme.colors.primary} />
+          <View style={[
+            styles.avatarContainer,
+            !hasActiveEnrollment && styles.avatarContainerInactive
+          ]}>
+            <Ionicons 
+              name={hasActiveEnrollment ? "person" : "person-outline"} 
+              size={28} 
+              color={hasActiveEnrollment ? theme.colors.primary : theme.colors.text.light} 
+            />
           </View>
           <View style={styles.childInfo}>
-            <Text style={styles.childName}>{student.name}</Text>
-            <Text style={styles.className}>
-              <Ionicons name="school" size={14} color={theme.colors.text.secondary} />
+            <Text style={[
+              styles.childName,
+              !hasActiveEnrollment && styles.childNameInactive
+            ]}>
+              {student.name}
+            </Text>
+            <Text style={[
+              styles.className,
+              !hasActiveEnrollment && styles.inactiveText
+            ]}>
+              <Ionicons 
+                name={hasActiveEnrollment ? "school" : "school-outline"} 
+                size={14} 
+                color={hasActiveEnrollment ? theme.colors.text.secondary : theme.colors.text.light} 
+              />
               {' '}Turma: {student.className}
             </Text>
-            <Text style={styles.teacherName}>
-              <Ionicons name="person-circle" size={14} color={theme.colors.text.secondary} />
+            <Text style={[
+              styles.teacherName,
+              !hasActiveEnrollment && styles.inactiveText
+            ]}>
+              <Ionicons 
+                name={hasActiveEnrollment ? "person-circle" : "person-circle-outline"} 
+                size={14} 
+                color={hasActiveEnrollment ? theme.colors.text.secondary : theme.colors.text.light} 
+              />
               {' '}Prof: {student.teacherName}
             </Text>
-            {student.schoolYear && (
+            {student.schoolYear && hasActiveEnrollment && (
               <Text style={styles.schoolYear}>
                 <Ionicons name="calendar" size={14} color={theme.colors.text.light} />
                 {' '}Ano: {student.schoolYear}
+              </Text>
+            )}
+            {!hasActiveEnrollment && (
+              <Text style={styles.warningText}>
+                <Ionicons name="warning" size={14} color={theme.colors.warning} />
+                {' '}Entre em contato com a escola para reativar
+              </Text>
+            )}
+            {/* NOVO: Mostrar que pode ser removido */}
+            {canDelete && (
+              <Text style={styles.deleteHintText}>
+                <Ionicons name="trash-outline" size={12} color={theme.colors.error} />
+                {' '}Pode ser removido do perfil
               </Text>
             )}
           </View>
@@ -260,33 +457,87 @@ export default function ParentDashboard({ navigation }) {
             ]}>
               <Text style={styles.statusText}>{getStatusText(student.attendanceStatus)}</Text>
             </View>
+            {/* NOVO: Botão de excluir (só para alunos sem turma) */}
+            {canDelete && (
+              <TouchableOpacity
+                style={styles.deleteButton}
+                onPress={() => deleteStudent(student)}
+                disabled={deletingStudent === student.id}
+              >
+                {deletingStudent === student.id ? (
+                  <ActivityIndicator size="small" color={theme.colors.error} />
+                ) : (
+                  <Ionicons name="trash-outline" size={16} color={theme.colors.error} />
+                )}
+              </TouchableOpacity>
+            )}
           </View>
         </View>
 
         <View style={styles.cardActions}>
           <TouchableOpacity
-            style={[styles.actionButton, styles.primaryAction]}
-            onPress={() => sendPickupNotification(student)}
-            disabled={sendingNotification === student.id || !student.teacherId}
+            style={[
+              styles.actionButton, 
+              hasActiveEnrollment ? styles.primaryAction : styles.disabledAction
+            ]}
+            onPress={() => hasActiveEnrollment ? sendPickupNotification(student) : null}
+            disabled={!hasActiveEnrollment || sendingNotification === student.id}
           >
             {sendingNotification === student.id ? (
               <ActivityIndicator size="small" color="white" />
             ) : (
-              <Ionicons name="car" size={18} color="white" />
+              <Ionicons 
+                name={hasActiveEnrollment ? "car" : "car-outline"} 
+                size={18} 
+                color={hasActiveEnrollment ? "white" : theme.colors.text.light} 
+              />
             )}
-            <Text style={styles.primaryActionText}>
-              {sendingNotification === student.id ? 'Enviando...' : 'Notificar Busca'}
+            <Text style={[
+              hasActiveEnrollment ? styles.primaryActionText : styles.disabledActionText
+            ]}>
+              {!hasActiveEnrollment ? 'Sem Turma' : 
+               sendingNotification === student.id ? 'Enviando...' : 'Notificar Busca'}
             </Text>
           </TouchableOpacity>
 
           <TouchableOpacity 
-            style={[styles.actionButton, styles.secondaryAction]}
+            style={[
+              styles.actionButton, 
+              hasActiveEnrollment ? styles.secondaryAction : 
+              canDelete ? styles.deleteAction : styles.disabledAction
+            ]}
             onPress={() => {
-              Alert.alert('Em breve', 'Histórico de presença será implementado em breve!');
+              if (hasActiveEnrollment) {
+                Alert.alert('Em breve', 'Histórico de presença será implementado em breve!');
+              } else if (canDelete) {
+                deleteStudent(student);
+              } else {
+                Alert.alert(
+                  'Aluno Sem Turma', 
+                  `${student.name} não está matriculado em nenhuma turma.\n\nEntre em contato com a escola para reativar a matrícula.`
+                );
+              }
             }}
+            disabled={deletingStudent === student.id}
           >
-            <Ionicons name="calendar" size={18} color={theme.colors.text.secondary} />
-            <Text style={styles.secondaryActionText}>Ver Histórico</Text>
+            {deletingStudent === student.id ? (
+              <ActivityIndicator size="small" color={theme.colors.error} />
+            ) : (
+              <Ionicons 
+                name={hasActiveEnrollment ? "calendar" : 
+                      canDelete ? "trash" : "information-circle-outline"} 
+                size={18} 
+                color={hasActiveEnrollment ? theme.colors.text.secondary : 
+                       canDelete ? "white" : theme.colors.text.light} 
+              />
+            )}
+            <Text style={[
+              hasActiveEnrollment ? styles.secondaryActionText : 
+              canDelete ? styles.deleteActionText : styles.disabledActionText
+            ]}>
+              {hasActiveEnrollment ? 'Ver Histórico' : 
+               canDelete ? 'Remover' : 'Info'}
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -390,15 +641,21 @@ export default function ParentDashboard({ navigation }) {
               <TouchableOpacity 
                 style={styles.quickActionCard}
                 onPress={() => {
-                  if (students.length === 1) {
-                    sendPickupNotification(students[0]);
+                  const activeStudents = students.filter(s => s.classId);
+                  if (activeStudents.length === 0) {
+                    Alert.alert('Aviso', 'Nenhum filho está matriculado em turma ativa.');
+                    return;
+                  }
+                  
+                  if (activeStudents.length === 1) {
+                    sendPickupNotification(activeStudents[0]);
                   } else {
                     Alert.alert(
                       'Escolher Filho',
                       'Para qual filho você gostaria de enviar notificação de busca?',
                       [
                         { text: 'Cancelar', style: 'cancel' },
-                        ...students.map(student => ({
+                        ...activeStudents.map(student => ({
                           text: student.name,
                           onPress: () => sendPickupNotification(student)
                         }))
@@ -541,6 +798,12 @@ const styles = StyleSheet.create({
     marginBottom: theme.spacing.md,
     ...theme.shadows.small,
   },
+  childCardInactive: {
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    opacity: 0.8,
+  },
   childHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -555,6 +818,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginRight: theme.spacing.md,
   },
+  avatarContainerInactive: {
+    backgroundColor: '#e9ecef',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
   childInfo: {
     flex: 1,
   },
@@ -563,6 +831,9 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: theme.colors.text.primary,
     marginBottom: 4,
+  },
+  childNameInactive: {
+    color: theme.colors.text.secondary,
   },
   className: {
     fontSize: 14,
@@ -578,6 +849,22 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: theme.colors.text.light,
   },
+  inactiveText: {
+    color: theme.colors.text.light,
+  },
+  warningText: {
+    fontSize: 12,
+    color: theme.colors.warning,
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  // NOVO: Estilo para texto de dica de exclusão
+  deleteHintText: {
+    fontSize: 11,
+    color: theme.colors.error,
+    marginTop: 2,
+    fontStyle: 'italic',
+  },
   statusContainer: {
     alignItems: 'flex-end',
   },
@@ -585,11 +872,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.spacing.sm,
     paddingVertical: 4,
     borderRadius: 12,
+    marginBottom: 8,
   },
   statusText: {
     color: 'white',
     fontSize: 12,
     fontWeight: '600',
+  },
+  // NOVO: Botão de exclusão no canto superior direito
+  deleteButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#fee2e2',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#fecaca',
   },
   cardActions: {
     flexDirection: 'row',
@@ -615,6 +914,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: theme.colors.border,
   },
+  // NOVO: Estilo para botão de exclusão
+  deleteAction: {
+    backgroundColor: theme.colors.error,
+  },
+  disabledAction: {
+    backgroundColor: '#e9ecef',
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
   primaryActionText: {
     color: 'white',
     fontSize: 14,
@@ -622,6 +930,16 @@ const styles = StyleSheet.create({
   },
   secondaryActionText: {
     color: theme.colors.text.secondary,
+    fontSize: 14,
+  },
+  // NOVO: Texto para botão de exclusão
+  deleteActionText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  disabledActionText: {
+    color: theme.colors.text.light,
     fontSize: 14,
   },
   quickActions: {
@@ -682,7 +1000,7 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: '600',
   },
-  bottomSpacing: {
-    height: theme.spacing.xl,
-  },
-});
+    bottomSpacing: {
+      height: theme.spacing.xl,
+    },
+  });
