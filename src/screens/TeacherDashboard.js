@@ -16,11 +16,14 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
+import { useNotifications } from '../contexts/NotificationContext'; // NOVO
+import { NotificationBadge } from '../components/NotificationBadge'; // NOVO
 import { supabase } from '../services/supabase';
 import { theme } from '../styles/theme';
 
 export default function TeacherDashboard({ navigation }) {
   const { signOut, profile, user } = useAuth();
+  const { unreadCount, notifications: contextNotifications, respondToPickup } = useNotifications(); // NOVO
   const insets = useSafeAreaInsets();
   const [classes, setClasses] = useState([]);
   const [notifications, setNotifications] = useState([]);
@@ -34,12 +37,21 @@ export default function TeacherDashboard({ navigation }) {
     fetchData();
   }, []);
 
+  // NOVO: Sincronizar notificações do contexto
+  useEffect(() => {
+    if (contextNotifications) {
+      // Filtrar apenas notificações pendentes para mostrar no dashboard
+      const pendingNotifications = contextNotifications.filter(n => n.status === 'pending');
+      setNotifications(pendingNotifications);
+    }
+  }, [contextNotifications]);
+
   const fetchData = async () => {
     try {
       setLoading(true);
       await Promise.all([
         fetchClasses(),
-        fetchNotifications()
+        // Removido fetchNotifications - agora usa o contexto
       ]);
     } catch (error) {
       console.error('Erro ao carregar dados:', error);
@@ -96,53 +108,6 @@ export default function TeacherDashboard({ navigation }) {
       console.error('Erro ao buscar turmas:', error);
       Alert.alert('Erro', 'Não foi possível carregar suas turmas');
       setClasses([]); // Set empty array on error
-    }
-  };
-
-  const fetchNotifications = async () => {
-    try {
-      // Query simples para notificações
-      const { data, error } = await supabase
-        .from('pickup_notifications')
-        .select('*')
-        .eq('teacher_id', user.id)
-        .eq('status', 'pending')
-        .order('created_at', { ascending: false })
-        .limit(10);
-
-      if (error) throw error;
-
-      // Para cada notificação, buscar dados do estudante e pai separadamente
-      const notificationsWithDetails = await Promise.all(
-        (data || []).map(async (notification) => {
-          // Buscar dados do estudante
-          const { data: student } = await supabase
-            .from('students')
-            .select('name')
-            .eq('id', notification.student_id)
-            .single();
-
-          // Buscar dados do pai
-          const { data: parent } = await supabase
-            .from('profiles')
-            .select('name')
-            .eq('id', notification.parent_id)
-            .single();
-
-          return {
-            ...notification,
-            students: student || { name: 'Aluno não encontrado' },
-            profiles: parent || { name: 'Responsável não encontrado' }
-          };
-        })
-      );
-
-      console.log('Notifications with details:', notificationsWithDetails);
-      setNotifications(notificationsWithDetails);
-    } catch (error) {
-      console.error('Erro ao buscar notificações:', error);
-      // Não mostrar erro para notificações, pode não ter dados
-      setNotifications([]);
     }
   };
 
@@ -318,57 +283,24 @@ export default function TeacherDashboard({ navigation }) {
     }
   };
 
+  // FUNÇÕES ATUALIZADAS: Usar hook de notificações
   const confirmPickup = async (notificationId) => {
     try {
-      console.log('Confirmando busca para notificação:', notificationId);
-      
-      const { error } = await supabase
-        .from('pickup_notifications')
-        .update({ 
-          status: 'confirmed'
-        })
-        .eq('id', notificationId);
-
-      if (error) {
-        console.error('Erro ao confirmar busca:', error);
-        throw error;
-      }
-
-      console.log('Busca confirmada com sucesso');
-      
-      // Remover da lista local
-      setNotifications(notifications.filter(n => n.id !== notificationId));
-      Alert.alert('Sucesso', 'Busca confirmada! O responsável foi notificado.');
+      await respondToPickup(notificationId, true, 'Autorizado pelo professor');
+      // A atualização da lista será feita automaticamente pelo contexto
     } catch (error) {
       console.error('Erro ao confirmar busca:', error);
-      Alert.alert('Erro', `Não foi possível confirmar a busca: ${error.message}`);
+      Alert.alert('Erro', 'Não foi possível confirmar a busca. Tente novamente.');
     }
   };
 
   const rejectPickup = async (notificationId) => {
     try {
-      console.log('Recusando busca para notificação:', notificationId);
-      
-      const { error } = await supabase
-        .from('pickup_notifications')
-        .update({ 
-          status: 'cancelled'
-        })
-        .eq('id', notificationId);
-
-      if (error) {
-        console.error('Erro ao recusar busca:', error);
-        throw error;
-      }
-
-      console.log('Busca recusada com sucesso');
-      
-      // Remover da lista local
-      setNotifications(notifications.filter(n => n.id !== notificationId));
-      Alert.alert('Busca recusada', 'A solicitação foi recusada. O responsável foi notificado.');
+      await respondToPickup(notificationId, false, 'Negado pelo professor');
+      // A atualização da lista será feita automaticamente pelo contexto
     } catch (error) {
       console.error('Erro ao recusar busca:', error);
-      Alert.alert('Erro', `Não foi possível recusar a busca: ${error.message}`);
+      Alert.alert('Erro', 'Não foi possível recusar a busca. Tente novamente.');
     }
   };
 
@@ -491,7 +423,7 @@ export default function TeacherDashboard({ navigation }) {
 
         <Text style={styles.notificationText}>
           <Text style={styles.notificationBold}>
-            {notification.profiles?.name || 'Responsável'}
+            {notification.parent_profiles?.name || 'Responsável'}
           </Text>
           {' '}solicitou a busca de{' '}
           <Text style={styles.notificationBold}>
@@ -552,11 +484,41 @@ export default function TeacherDashboard({ navigation }) {
             </Text>
             <Text style={styles.subGreeting}>Gerencie suas turmas</Text>
           </View>
-          <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
-            <Ionicons name="log-out-outline" size={24} color="white" />
-          </TouchableOpacity>
+          
+          {/* NOVO: Botões do header */}
+          <View style={styles.headerActions}>
+            {/* Botão de notificações com badge */}
+            <TouchableOpacity 
+              style={styles.notificationButton} 
+              onPress={() => navigation.navigate('Notifications')}
+            >
+              <Ionicons name="notifications-outline" size={24} color="white" />
+              <NotificationBadge />
+            </TouchableOpacity>
+            
+            {/* Botão de logout existente */}
+            <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
+              <Ionicons name="log-out-outline" size={24} color="white" />
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
+
+      {/* NOVO: Resumo de notificações pendentes */}
+      {unreadCount > 0 && (
+        <View style={styles.notificationSummary}>
+          <Ionicons name="alert-circle" size={20} color="#f59e0b" />
+          <Text style={styles.notificationSummaryText}>
+            Você tem {unreadCount} solicitação{unreadCount > 1 ? 'ões' : ''} de busca pendente{unreadCount > 1 ? 's' : ''}
+          </Text>
+          <TouchableOpacity 
+            style={styles.viewNotificationsButton}
+            onPress={() => navigation.navigate('Notifications')}
+          >
+            <Text style={styles.viewNotificationsText}>Ver</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Conteúdo */}
       <ScrollView
@@ -582,7 +544,7 @@ export default function TeacherDashboard({ navigation }) {
 
           <View style={styles.summaryCard}>
             <Ionicons name="notifications" size={24} color={theme.colors.warning} />
-            <Text style={styles.summaryNumber}>{notifications.length}</Text>
+            <Text style={styles.summaryNumber}>{unreadCount}</Text>
             <Text style={styles.summaryLabel}>Pendentes</Text>
           </View>
         </View>
@@ -590,8 +552,17 @@ export default function TeacherDashboard({ navigation }) {
         {/* Notificações pendentes */}
         {notifications.length > 0 && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Notificações Pendentes</Text>
-            {notifications.map(renderNotificationCard)}
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Notificações Pendentes</Text>
+              <TouchableOpacity
+                style={styles.viewAllButton}
+                onPress={() => navigation.navigate('Notifications')}
+              >
+                <Text style={styles.viewAllText}>Ver Todas</Text>
+              </TouchableOpacity>
+            </View>
+            {/* Mostrar apenas as 3 primeiras */}
+            {notifications.slice(0, 3).map(renderNotificationCard)}
           </View>
         )}
 
@@ -734,6 +705,27 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 1,
   },
+  // NOVO: Estilos para os botões do header
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  notificationButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+    // Sombra para destaque
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
   profileButton: {
     width: 44,
     height: 44,
@@ -747,6 +739,36 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  // NOVO: Resumo de notificações
+  notificationSummary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fffbeb',
+    marginHorizontal: theme.spacing.lg,
+    marginTop: theme.spacing.md,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: '#fed7aa',
+  },
+  notificationSummaryText: {
+    flex: 1,
+    marginLeft: theme.spacing.sm,
+    fontSize: 14,
+    color: '#92400e',
+    fontWeight: '500',
+  },
+  viewNotificationsButton: {
+    backgroundColor: '#f59e0b',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 6,
+    borderRadius: theme.borderRadius.sm,
+  },
+  viewNotificationsText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   content: {
     flex: 1,
@@ -794,6 +816,20 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     color: theme.colors.text.primary,
+  },
+  // NOVO: Botão "Ver Todas"
+  viewAllButton: {
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 6,
+    backgroundColor: theme.colors.background,
+    borderRadius: theme.borderRadius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  viewAllText: {
+    color: theme.colors.text.secondary,
+    fontSize: 12,
+    fontWeight: '600',
   },
   addButton: {
     width: 36,
@@ -952,7 +988,7 @@ const styles = StyleSheet.create({
   },
   confirmButtonText: {
     color: 'white',
-    fontweight: '600',
+    fontWeight: '600',
   },
   rejectButton: {
     flex: 1,

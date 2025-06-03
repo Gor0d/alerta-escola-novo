@@ -10,8 +10,7 @@ import AuthScreen from '../screens/AuthScreen';
 import ParentDashboard from '../screens/ParentDashboard';
 import TeacherDashboard from '../screens/TeacherDashboard';
 import ClassDetailsScreen from '../screens/ClassDetailsScreen';
-
-
+import NotificationScreen from '../screens/NotificationScreen';
 
 const Stack = createStackNavigator();
 
@@ -35,12 +34,30 @@ export default function AppNavigator() {
           // Stack principal baseado no role do usuário
           <>
             {profile?.role === 'parent' && (
-              <Stack.Screen name="ParentDashboard" component={ParentDashboard} />
+              <>
+                <Stack.Screen name="ParentDashboard" component={ParentDashboard} />
+                {/* CORRIGIDO: Tela de notificações para pais - SEM header nativo */}
+                <Stack.Screen 
+                  name="Notifications" 
+                  component={NotificationScreen}
+                  options={{
+                    headerShown: false  // ← CORREÇÃO: usar header customizado do componente
+                  }}
+                />
+              </>
             )}
             {profile?.role === 'teacher' && (
               <>
                 <Stack.Screen name="TeacherDashboard" component={TeacherDashboard} />
                 <Stack.Screen name="ClassDetails" component={ClassDetailsScreen} />
+                {/* CORRIGIDO: Tela de notificações para professores - SEM header nativo */}
+                <Stack.Screen 
+                  name="Notifications" 
+                  component={NotificationScreen}
+                  options={{
+                    headerShown: false  // ← CORREÇÃO: usar header customizado do componente
+                  }}
+                />
               </>
             )}
             {!profile?.role && (

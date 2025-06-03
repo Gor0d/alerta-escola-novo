@@ -1,9 +1,5 @@
-// ==========================================
-// 1. NotificationContext.js - Context para gerenciar notificações
-// ==========================================
-
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Alert, Platform } from 'react-native';
+import { Alert } from 'react-native';
 import { supabase } from '../services/supabase';
 import { useAuth } from './AuthContext';
 
@@ -23,45 +19,43 @@ export const NotificationProvider = ({ children }) => {
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setNotifications([]);
+      setUnreadCount(0);
+      return;
+    }
 
-    // Buscar notificações existentes
+    console.log(`🔔 Iniciando notificações para ${profile?.role}: ${profile?.name}`);
     fetchNotifications();
 
-    // Configurar subscription para notificações em tempo real
-    const channel = supabase
-      .channel('notifications')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'pickup_notifications',
-          filter: `teacher_id=eq.${user.id}`, // Para professores
-        },
-        handleNewPickupNotification
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'pickup_notifications',
-          filter: `parent_id=eq.${user.id}`, // Para pais
-        },
-        handlePickupUpdate
-      )
-      .subscribe();
+    // Real-time subscription simplificado
+    let channel = null;
+    
+    if (user && profile) {
+      channel = supabase
+        .channel(`notifications_${user.id}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'pickup_notifications' }, (payload) => {
+          console.log('📡 Real-time update:', payload);
+          fetchNotifications(); // Recarrega tudo para simplicidade
+        })
+        .subscribe((status) => {
+          console.log(`📡 Subscription status: ${status}`);
+        });
+    }
 
     return () => {
-      channel.unsubscribe();
+      if (channel) {
+        channel.unsubscribe();
+      }
     };
-  }, [user]);
+  }, [user, profile]);
 
   const fetchNotifications = async () => {
-    if (!user) return;
+    if (!user || !profile) return;
 
     try {
+      console.log(`📥 Buscando notificações para ${profile.role}...`);
+      
       let query = supabase
         .from('pickup_notifications')
         .select(`
@@ -70,180 +64,217 @@ export const NotificationProvider = ({ children }) => {
           parent_profiles:profiles!pickup_notifications_parent_id_fkey(name),
           teacher_profiles:profiles!pickup_notifications_teacher_id_fkey(name)
         `)
-        .order('created_at', { ascending: false })
-        .limit(20);
+        .order('created_at', { ascending: false });
 
-      // Filtrar baseado no papel do usuário
+      // Filtrar por papel do usuário (simplificado)
+      if (profile.role === 'teacher') {
+        query = query.eq('teacher_id', user.id);
+      } else if (profile.role === 'parent') {
+        query = query.eq('parent_id', user.id);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        console.error('❌ Erro ao buscar notificações:', error);
+        return;
+      }
+
+      console.log(`✅ ${data?.length || 0} notificações carregadas`);
+      setNotifications(data || []);
+      
+      // Contar não lidas
+      const unread = data?.filter(n => !n.updated_at && !n.confirmed_at && !n.completed_at).length || 0;
+      setUnreadCount(unread);
+      console.log(`📬 ${unread} notificações não lidas`);
+
+    } catch (error) {
+      console.error('❌ Erro ao buscar notificações:', error);
+    }
+  };
+
+  const markAsRead = async (notificationId) => {
+    try {
+      console.log(`📖 Marcando como lida: ${notificationId}`);
+      
+      const { error } = await supabase
+        .from('pickup_notifications')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', notificationId);
+
+      if (error) throw error;
+
+      // Atualizar estado local
+      setNotifications(prev => 
+        prev.map(n => n.id === notificationId ? { ...n, updated_at: new Date().toISOString() } : n)
+      );
+      
+      setUnreadCount(prev => Math.max(0, prev - 1));
+      console.log('✅ Marcada como lida');
+
+    } catch (error) {
+      console.error('❌ Erro ao marcar como lida:', error);
+    }
+  };
+
+  const markAllAsRead = async () => {
+    try {
+      console.log('📖 Marcando TODAS como lidas...');
+      
+      let query = supabase
+        .from('pickup_notifications')
+        .update({ updated_at: new Date().toISOString() })
+        .is('updated_at', null);
+
+      // Filtrar por usuário
       if (profile?.role === 'teacher') {
         query = query.eq('teacher_id', user.id);
       } else if (profile?.role === 'parent') {
         query = query.eq('parent_id', user.id);
       }
 
-      const { data, error } = await query;
-
+      const { error } = await query;
       if (error) throw error;
 
-      setNotifications(data || []);
-      setUnreadCount(data?.filter(n => !n.read_at).length || 0);
+      // Atualizar estado local
+      setNotifications(prev => 
+        prev.map(notification => ({
+          ...notification,
+          updated_at: notification.updated_at || new Date().toISOString()
+        }))
+      );
+
+      setUnreadCount(0);
+      console.log('✅ TODAS marcadas como lidas');
+
     } catch (error) {
-      console.error('Erro ao buscar notificações:', error);
+      console.error('❌ Erro ao marcar todas como lidas:', error);
+      throw new Error('Não foi possível marcar as notificações como lidas');
     }
   };
 
-  const handleNewPickupNotification = (payload) => {
-    console.log('=== NOVA NOTIFICAÇÃO DE BUSCA RECEBIDA ===');
-    console.log('Payload:', payload);
+  const clearAllNotifications = async () => {
+    try {
+      console.log('🗑️ Removendo TODAS as notificações...');
+      
+      let query = supabase.from('pickup_notifications').delete();
 
-    if (profile?.role !== 'teacher') return;
-
-    const newNotification = payload.new;
-    
-    // Buscar dados completos da notificação
-    fetchNotificationDetails(newNotification.id).then((fullNotification) => {
-      if (fullNotification) {
-        // Adicionar à lista
-        setNotifications(prev => [fullNotification, ...prev]);
-        setUnreadCount(prev => prev + 1);
-
-        // Mostrar pop-up
-        showPickupNotificationPopup(fullNotification);
+      // Filtrar por usuário
+      if (profile?.role === 'teacher') {
+        query = query.eq('teacher_id', user.id);
+      } else if (profile?.role === 'parent') {
+        query = query.eq('parent_id', user.id);
       }
-    });
-  };
 
-  const handlePickupUpdate = (payload) => {
-    console.log('=== ATUALIZAÇÃO DE NOTIFICAÇÃO DE BUSCA ===');
-    console.log('Payload:', payload);
-
-    if (profile?.role !== 'parent') return;
-
-    const updatedNotification = payload.new;
-    
-    // Atualizar na lista
-    setNotifications(prev => 
-      prev.map(n => n.id === updatedNotification.id ? updatedNotification : n)
-    );
-
-    // Se foi confirmada/rejeitada, mostrar pop-up para o pai
-    if (updatedNotification.status === 'confirmed' || updatedNotification.status === 'rejected') {
-      fetchNotificationDetails(updatedNotification.id).then((fullNotification) => {
-        if (fullNotification) {
-          showPickupResponsePopup(fullNotification);
-        }
-      });
-    }
-  };
-
-  const fetchNotificationDetails = async (notificationId) => {
-    try {
-      const { data, error } = await supabase
-        .from('pickup_notifications')
-        .select(`
-          *,
-          students(name),
-          parent_profiles:profiles!pickup_notifications_parent_id_fkey(name),
-          teacher_profiles:profiles!pickup_notifications_teacher_id_fkey(name)
-        `)
-        .eq('id', notificationId)
-        .single();
-
+      const { error } = await query;
       if (error) throw error;
-      return data;
+
+      // Limpar estado local
+      setNotifications([]);
+      setUnreadCount(0);
+      console.log('✅ TODAS as notificações removidas');
+
     } catch (error) {
-      console.error('Erro ao buscar detalhes da notificação:', error);
-      return null;
+      console.error('❌ Erro ao limpar notificações:', error);
+      throw new Error('Não foi possível limpar as notificações');
     }
   };
 
-  const showPickupNotificationPopup = (notification) => {
-    const parentName = notification.parent_profiles?.name || 'Responsável';
-    const studentName = notification.students?.name || 'Aluno';
-    
-    Alert.alert(
-      '🚗 Nova Solicitação de Busca',
-      `${parentName} solicitou buscar ${studentName}.\n\nMotivo: ${notification.reason || 'Busca normal'}\n\nDeseja autorizar?`,
-      [
-        {
-          text: '❌ Rejeitar',
-          style: 'destructive',
-          onPress: () => respondToPickup(notification.id, 'rejected')
-        },
-        {
-          text: '✅ Autorizar',
-          onPress: () => respondToPickup(notification.id, 'confirmed')
-        }
-      ],
-      { cancelable: false }
-    );
-  };
-
-  const showPickupResponsePopup = (notification) => {
-    const teacherName = notification.teacher_profiles?.name || 'Professor';
-    const studentName = notification.students?.name || 'Seu filho';
-    
-    if (notification.status === 'confirmed') {
-      Alert.alert(
-        '✅ Busca Autorizada',
-        `${teacherName} autorizou a busca de ${studentName}.\n\nVocê pode ir buscar seu filho agora!`,
-        [{ text: 'Entendi', style: 'default' }]
-      );
-    } else if (notification.status === 'rejected') {
-      Alert.alert(
-        '❌ Busca Negada',
-        `${teacherName} não autorizou a busca de ${studentName} no momento.\n\nEntre em contato com a escola para mais informações.`,
-        [{ text: 'Entendi', style: 'default' }]
-      );
-    }
-  };
-
-  const respondToPickup = async (notificationId, status) => {
+  const respondToPickup = async (notificationId, isConfirmed, notes = '') => {
     try {
+      console.log(`📝 Respondendo: ${isConfirmed ? 'AUTORIZAR' : 'REJEITAR'}`);
+      
+      const updateData = {
+        status: isConfirmed ? 'confirmed' : 'rejected',
+        updated_at: new Date().toISOString(),
+        notes: notes
+      };
+
+      if (isConfirmed) {
+        updateData.confirmed_at = new Date().toISOString();
+      } else {
+        updateData.completed_at = new Date().toISOString();
+      }
+
       const { error } = await supabase
         .from('pickup_notifications')
-        .update({
-          status: status,
-          responded_at: new Date().toISOString(),
-          response_notes: status === 'confirmed' ? 'Autorizado pelo professor' : 'Negado pelo professor'
-        })
+        .update(updateData)
         .eq('id', notificationId);
 
       if (error) throw error;
 
       // Atualizar localmente
       setNotifications(prev => 
-        prev.map(n => n.id === notificationId ? { ...n, status } : n)
+        prev.map(n => n.id === notificationId ? { ...n, ...updateData } : n)
       );
 
       Alert.alert(
-        'Resposta Enviada',
-        status === 'confirmed' 
+        'Resposta Enviada! 📱',
+        isConfirmed 
           ? 'Busca autorizada! O responsável foi notificado.'
           : 'Busca negada. O responsável foi notificado.'
       );
 
     } catch (error) {
-      console.error('Erro ao responder notificação:', error);
-      Alert.alert('Erro', 'Não foi possível enviar a resposta. Tente novamente.');
+      console.error('❌ Erro ao responder:', error);
+      Alert.alert('Erro', 'Não foi possível enviar a resposta');
     }
   };
 
-  const markAsRead = async (notificationId) => {
+  const sendPickupNotification = async (studentId, teacherId, reason = 'Busca solicitada') => {
     try {
-      const { error } = await supabase
+      console.log('📤 Enviando nova notificação...');
+      
+      const notificationData = {
+        student_id: studentId,
+        parent_id: user.id,
+        teacher_id: teacherId,
+        pickup_time: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // +1 hora
+        reason: reason,
+        status: 'pending'
+      };
+
+      const { data, error } = await supabase
         .from('pickup_notifications')
-        .update({ read_at: new Date().toISOString() })
-        .eq('id', notificationId);
+        .insert(notificationData)
+        .select()
+        .single();
 
       if (error) throw error;
 
-      setNotifications(prev => 
-        prev.map(n => n.id === notificationId ? { ...n, read_at: new Date().toISOString() } : n)
-      );
+      console.log('✅ Notificação enviada:', data);
       
-      setUnreadCount(prev => Math.max(0, prev - 1));
+      // Recarregar notificações
+      fetchNotifications();
+      
+      return true;
+
     } catch (error) {
-      console.error('Erro ao marcar como lida:', error);
+      console.error('❌ Erro ao enviar:', error);
+      throw error;
+    }
+  };
+
+  // Função de teste para criar notificações rapidamente
+  const createTestNotification = async () => {
+    try {
+      // Buscar IDs disponíveis
+      const { data: students } = await supabase.from('students').select('id').limit(1);
+      const { data: teachers } = await supabase.from('profiles').select('id').eq('role', 'teacher').limit(1);
+      
+      if (students?.length && teachers?.length) {
+        await sendPickupNotification(
+          students[0].id,
+          teachers[0].id,
+          'Notificação de teste criada automaticamente'
+        );
+        Alert.alert('Sucesso', 'Notificação de teste criada!');
+      } else {
+        Alert.alert('Erro', 'Não foi possível encontrar estudantes ou professores');
+      }
+    } catch (error) {
+      console.error('❌ Erro no teste:', error);
+      Alert.alert('Erro', 'Falha ao criar notificação de teste');
     }
   };
 
@@ -252,7 +283,11 @@ export const NotificationProvider = ({ children }) => {
     unreadCount,
     fetchNotifications,
     markAsRead,
-    respondToPickup
+    markAllAsRead,
+    clearAllNotifications,
+    respondToPickup,
+    sendPickupNotification,
+    createTestNotification // Função extra para testes
   };
 
   return (
@@ -261,46 +296,3 @@ export const NotificationProvider = ({ children }) => {
     </NotificationContext.Provider>
   );
 };
-
-// ==========================================
-// 2. NotificationBadge.js - Badge de contador
-// ==========================================
-
-import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
-import { useNotifications } from '../contexts/NotificationContext';
-
-export const NotificationBadge = ({ style }) => {
-  const { unreadCount } = useNotifications();
-
-  if (unreadCount === 0) return null;
-
-  return (
-    <View style={[badgeStyles.badge, style]}>
-      <Text style={badgeStyles.badgeText}>
-        {unreadCount > 99 ? '99+' : unreadCount}
-      </Text>
-    </View>
-  );
-};
-
-const badgeStyles = StyleSheet.create({
-  badge: {
-    position: 'absolute',
-    top: -5,
-    right: -5,
-    backgroundColor: '#ef4444',
-    borderRadius: 10,
-    minWidth: 20,
-    height: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: 'white',
-  },
-  badgeText: {
-    color: 'white',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-});

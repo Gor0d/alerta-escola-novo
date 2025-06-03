@@ -15,11 +15,14 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
+import { useNotifications } from '../contexts/NotificationContext'; // NOVO
+import { NotificationBadge } from '../components/NotificationBadge'; // NOVO
 import { supabase } from '../services/supabase';
 import { theme } from '../styles/theme';
 
 export default function ParentDashboard({ navigation }) {
   const { signOut, profile, user } = useAuth();
+  const { sendPickupNotification: sendNotification, unreadCount } = useNotifications(); // NOVO
   const insets = useSafeAreaInsets();
   const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -185,42 +188,35 @@ useEffect(() => {
     fetchStudents();
   };
 
+  // FUNÇÃO ATUALIZADA: Usar o hook de notificações
   const sendPickupNotification = async (student) => {
     if (!student.teacherId || !student.classId) {
       Alert.alert('Erro', 'Não foi possível enviar notificação. Dados do professor não encontrados.');
       return;
     }
 
-    Alert.alert(
+    // NOVO: Input personalizado para motivo
+    Alert.prompt(
       'Notificar Busca',
-      `Deseja notificar o(a) professor(a) ${student.teacherName} que irá buscar ${student.name}?`,
+      `Informe o motivo da busca de ${student.name}:`,
       [
         { text: 'Cancelar', style: 'cancel' },
         {
-          text: 'Confirmar',
-          onPress: async () => {
+          text: 'Enviar',
+          onPress: async (reason) => {
             try {
               setSendingNotification(student.id);
               
-              const { error } = await supabase
-                .from('pickup_notifications')
-                .insert({
-                  student_id: student.id,
-                  parent_id: user.id,
-                  teacher_id: student.teacherId,
-                  pickup_time: new Date().toISOString(),
-                  reason: 'Busca solicitada pelo responsável',
-                  status: 'pending'
-                });
-
-              if (error) {
-                console.error('Erro ao enviar notificação:', error);
-                throw error;
-              }
+              // USAR o hook de notificações
+              await sendNotification(
+                student.id, 
+                student.teacherId, 
+                reason || 'Busca solicitada pelo responsável'
+              );
 
               Alert.alert(
-                'Sucesso!', 
-                `Notificação enviada para ${student.teacherName}. O professor será avisado que você irá buscar ${student.name}.`
+                'Notificação Enviada! 📱', 
+                `${student.teacherName} foi notificado sobre a busca de ${student.name}.\n\nVocê receberá uma confirmação quando a solicitação for respondida.`
               );
             } catch (error) {
               console.error('Erro ao enviar notificação:', error);
@@ -230,7 +226,9 @@ useEffect(() => {
             }
           }
         }
-      ]
+      ],
+      'plain-text',
+      'Consulta médica' // Texto padrão
     );
   };
 
@@ -271,39 +269,6 @@ useEffect(() => {
               if (enrollmentError) {
                 console.log('Aviso: Erro ao limpar matrículas:', enrollmentError);
                 // Não bloquear por isso, continuar
-              }
-              
-              // 3. Remover mensagens relacionadas (se existir)
-              const { error: messagesError } = await supabase
-                .from('messages')
-                .delete()
-                .eq('student_id', student.id);
-              
-              if (messagesError) {
-                console.log('Aviso: Erro ao limpar mensagens:', messagesError);
-                // Não é crítico, continuar
-              }
-              
-              // 4. Remover conversas relacionadas (se existir)
-              const { error: conversationsError } = await supabase
-                .from('conversations')
-                .delete()
-                .eq('student_id', student.id);
-              
-              if (conversationsError) {
-                console.log('Aviso: Erro ao limpar conversas:', conversationsError);
-                // Não é crítico, continuar
-              }
-              
-              // 5. Remover presenças/faltas (se existir)
-              const { error: attendancesError } = await supabase
-                .from('attendances')
-                .delete()
-                .eq('student_id', student.id);
-              
-              if (attendancesError) {
-                console.log('Aviso: Erro ao limpar presenças:', attendancesError);
-                // Não é crítico, continuar
               }
               
               // FINALMENTE: Deletar o aluno (agora sem dependências)
@@ -564,11 +529,41 @@ useEffect(() => {
             </Text>
             <Text style={styles.subGreeting}>Acompanhe seus filhos</Text>
           </View>
-          <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
-            <Ionicons name="log-out-outline" size={24} color="white" />
-          </TouchableOpacity>
+          
+          {/* NOVO: Botões do header */}
+          <View style={styles.headerActions}>
+            {/* Botão de notificações com badge */}
+            <TouchableOpacity 
+              style={styles.notificationButton} 
+              onPress={() => navigation.navigate('Notifications')}
+            >
+              <Ionicons name="notifications-outline" size={24} color="white" />
+              <NotificationBadge />
+            </TouchableOpacity>
+            
+            {/* Botão de logout existente */}
+            <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
+              <Ionicons name="log-out-outline" size={24} color="white" />
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
+
+      {/* NOVO: Resumo de notificações pendentes */}
+      {unreadCount > 0 && (
+        <View style={styles.notificationSummary}>
+          <Ionicons name="notifications" size={20} color="#f59e0b" />
+          <Text style={styles.notificationSummaryText}>
+            Você tem {unreadCount} notificação{unreadCount > 1 ? 'ões' : ''} não lida{unreadCount > 1 ? 's' : ''}
+          </Text>
+          <TouchableOpacity 
+            style={styles.viewNotificationsButton}
+            onPress={() => navigation.navigate('Notifications')}
+          >
+            <Text style={styles.viewNotificationsText}>Ver</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Conteúdo */}
       <ScrollView
@@ -676,14 +671,16 @@ useEffect(() => {
                 <Text style={styles.quickActionText}>Atualizar Dados</Text>
               </TouchableOpacity>
 
+              {/* NOVO: Botão para notificações */}
               <TouchableOpacity 
                 style={styles.quickActionCard}
-                onPress={() => {
-                  Alert.alert('Em breve', 'Chat com professores será implementado em breve!');
-                }}
+                onPress={() => navigation.navigate('Notifications')}
               >
-                <Ionicons name="chatbubbles" size={32} color={theme.colors.secondary} />
-                <Text style={styles.quickActionText}>Chat Professor</Text>
+                <View style={styles.quickActionIconContainer}>
+                  <Ionicons name="notifications" size={32} color={theme.colors.secondary} />
+                  {unreadCount > 0 && <NotificationBadge size="small" />}
+                </View>
+                <Text style={styles.quickActionText}>Notificações</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -739,6 +736,27 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 1,
   },
+  // NOVO: Estilos para os botões do header
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  notificationButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+    // Sombra para destaque
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
   profileButton: {
     width: 44,
     height: 44,
@@ -752,6 +770,36 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  // NOVO: Resumo de notificações
+  notificationSummary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fffbeb',
+    marginHorizontal: theme.spacing.lg,
+    marginTop: theme.spacing.md,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: '#fed7aa',
+  },
+  notificationSummaryText: {
+    flex: 1,
+    marginLeft: theme.spacing.sm,
+    fontSize: 14,
+    color: '#92400e',
+    fontWeight: '500',
+  },
+  viewNotificationsButton: {
+    backgroundColor: '#f59e0b',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 6,
+    borderRadius: theme.borderRadius.sm,
+  },
+  viewNotificationsText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   content: {
     flex: 1,
@@ -955,6 +1003,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     ...theme.shadows.small,
   },
+  // NOVO: Container para ícone com badge
+  quickActionIconContainer: {
+    position: 'relative',
+  },
   quickActionText: {
     fontSize: 12,
     color: theme.colors.text.secondary,
@@ -1000,7 +1052,7 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: '600',
   },
-    bottomSpacing: {
-      height: theme.spacing.xl,
-    },
-  });
+  bottomSpacing: {
+    height: theme.spacing.xl,
+  },
+});
