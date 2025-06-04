@@ -189,12 +189,54 @@ export default function NoticeBoardScreen({ route, navigation }) {
     }
   };
 
-  const resetForm = () => {
-    setTitle('');
-    setContent('');
-    setNoticeType('general');
-    setSelectedImage(null);
-    setSelectedAttachment(null);
+  // NOVA FUNÇÃO: Apagar aviso
+  const handleDeleteNotice = async (notice) => {
+    Alert.alert(
+      'Excluir Aviso',
+      `Tem certeza que deseja excluir o aviso "${notice.title}"?\n\nEsta ação não pode ser desfeita.`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Excluir',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setLoading(true);
+              
+              const { data: { user } } = await supabase.auth.getUser();
+              
+              // Verificar se o usuário é o autor do aviso
+              if (notice.author_id !== user.id) {
+                Alert.alert('Erro', 'Você só pode excluir seus próprios avisos');
+                return;
+              }
+
+              console.log('🗑️ Excluindo aviso:', notice.id, notice.title);
+
+              const { error } = await supabase
+                .from('notices')
+                .delete()
+                .eq('id', notice.id)
+                .eq('author_id', user.id); // Segurança extra
+
+              if (error) throw error;
+
+              console.log('✅ Aviso excluído com sucesso');
+              
+              // Atualizar lista local
+              setNotices(notices.filter(n => n.id !== notice.id));
+              
+              Alert.alert('Sucesso', 'Aviso excluído com sucesso!');
+            } catch (error) {
+              console.error('❌ Erro ao excluir aviso:', error);
+              Alert.alert('Erro', `Não foi possível excluir o aviso: ${error.message}`);
+            } finally {
+              setLoading(false);
+            }
+          }
+        }
+      ]
+    );
   };
 
   const formatDate = (dateString) => {
@@ -209,6 +251,16 @@ export default function NoticeBoardScreen({ route, navigation }) {
 
   const getNoticeTypeInfo = (type) => {
     return noticeTypes.find(nt => nt.key === type) || noticeTypes[0];
+  };
+
+  // NOVA FUNÇÃO: Verificar se o usuário pode excluir o aviso
+  const canDeleteNotice = async (notice) => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      return user && notice.author_id === user.id;
+    } catch {
+      return false;
+    }
   };
 
   const renderNoticeItem = ({ item }) => {
@@ -236,6 +288,19 @@ export default function NoticeBoardScreen({ route, navigation }) {
               </Text>
             )}
           </View>
+          
+          {/* NOVO: Botão de excluir (só para o autor) */}
+          {userRole === 'teacher' && (
+            <TouchableOpacity
+              style={styles.deleteNoticeButton}
+              onPress={(e) => {
+                e.stopPropagation(); // Evitar abrir o modal
+                handleDeleteNotice(item);
+              }}
+            >
+              <Ionicons name="trash-outline" size={18} color={theme.colors.error} />
+            </TouchableOpacity>
+          )}
         </View>
         
         <Text style={[styles.noticeContent, { color: theme.colors.text.primary }]} numberOfLines={3}>
@@ -271,9 +336,14 @@ export default function NoticeBoardScreen({ route, navigation }) {
           <Text style={[styles.typeLabel, { color: typeInfo.color }]}>
             {typeInfo.label}
           </Text>
-          {item.attachment_url && (
-            <Ionicons name="attach" size={16} color={theme.colors.text.secondary} />
-          )}
+          <View style={styles.noticeFooterIcons}>
+            {item.attachment_url && (
+              <Ionicons name="attach" size={16} color={theme.colors.text.secondary} />
+            )}
+            {userRole === 'teacher' && (
+              <Ionicons name="create-outline" size={16} color={theme.colors.text.light} style={{ marginLeft: 8 }} />
+            )}
+          </View>
         </View>
       </TouchableOpacity>
     );
@@ -616,6 +686,22 @@ export default function NoticeBoardScreen({ route, navigation }) {
                           Fechar
                         </Text>
                       </TouchableOpacity>
+                      
+                      {/* NOVO: Botão de excluir no modal (só para o autor) */}
+                      {userRole === 'teacher' && (
+                        <TouchableOpacity
+                          style={[styles.deleteButton, { backgroundColor: theme.colors.error, marginTop: theme.spacing.sm }]}
+                          onPress={() => {
+                            setSelectedNotice(null); // Fechar modal primeiro
+                            setTimeout(() => handleDeleteNotice(selectedNotice), 100);
+                          }}
+                        >
+                          <Ionicons name="trash" size={18} color="white" />
+                          <Text style={[styles.deleteButtonText, { color: 'white', marginLeft: 8 }]}>
+                            Excluir Aviso
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                     </>
                   )}
                 </ScrollView>
@@ -711,6 +797,31 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  noticeFooterIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  // NOVOS: Estilos para botão de excluir
+  deleteNoticeButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: theme.colors.error + '15',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: theme.spacing.sm,
+  },
+  deleteButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: theme.spacing.sm,
+    borderRadius: theme.borderRadius.md,
+  },
+  deleteButtonText: {
+    fontSize: theme.typography.body.fontSize,
+    fontWeight: 'bold',
   },
   typeLabel: {
     fontSize: theme.typography.small.fontSize,

@@ -193,6 +193,62 @@ export default function CanteenManagementScreen({ route, navigation }) {
     fetchInitialData();
   };
 
+  const handleConfirmPayment = async (bill) => {
+    Alert.alert(
+      'Confirmar Pagamento',
+      `Confirmar o pagamento da fatura de ${bill.student?.name} referente a ${String(bill.month).padStart(2, '0')}/${bill.year}?\n\nValor: ${formatCurrency(bill.total_amount)}`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Confirmar',
+          onPress: async () => {
+            try {
+              setLoading(true);
+              
+              console.log('💰 Confirmando pagamento da fatura:', bill.id);
+              
+              const { error } = await supabase
+                .from('canteen_bills')
+                .update({ 
+                  status: 'paid',
+                  payment_date: new Date().toISOString()
+                })
+                .eq('id', bill.id);
+
+              if (error) throw error;
+
+              await supabase
+                .from('canteen_consumption')
+                .update({ 
+                  payment_status: 'paid',
+                  payment_date: new Date().toISOString()
+                })
+                .eq('student_id', bill.student_id)
+                .eq('payment_method', 'monthly')
+                .gte('consumed_at', new Date(bill.year, bill.month - 1, 1).toISOString())
+                .lt('consumed_at', new Date(bill.year, bill.month, 1).toISOString());
+
+              console.log('✅ Pagamento confirmado com sucesso');
+              
+              setBills(bills.map(b => 
+                b.id === bill.id 
+                  ? { ...b, status: 'paid', payment_date: new Date().toISOString() }
+                  : b
+              ));
+              
+              Alert.alert('✅ Pagamento Confirmado', 'A fatura foi marcada como paga com sucesso!');
+            } catch (error) {
+              console.error('❌ Erro ao confirmar pagamento:', error);
+              Alert.alert('Erro', `Não foi possível confirmar o pagamento: ${error.message}`);
+            } finally {
+              setLoading(false);
+            }
+          }
+        }
+      ]
+    );
+  };
+
   const handleAddItem = async () => {
     if (!newItemName.trim() || !newItemPrice.trim()) {
       Alert.alert('Erro', 'Nome e preço são obrigatórios');
@@ -251,7 +307,6 @@ export default function CanteenManagementScreen({ route, navigation }) {
 
       if (error) throw error;
 
-      // Atualizar ou criar faturas mensais para pagamento mensal
       if (paymentMethod === 'monthly') {
         await updateMonthlyBills(selectedStudents, selectedItem.price * parseInt(quantity));
       }
@@ -275,7 +330,6 @@ export default function CanteenManagementScreen({ route, navigation }) {
       const year = now.getFullYear();
 
       for (const studentId of studentIds) {
-        // Verificar se já existe uma fatura para este mês
         const { data: existingBill } = await supabase
           .from('canteen_bills')
           .select('*')
@@ -285,7 +339,6 @@ export default function CanteenManagementScreen({ route, navigation }) {
           .single();
 
         if (existingBill) {
-          // Atualizar fatura existente
           await supabase
             .from('canteen_bills')
             .update({
@@ -293,7 +346,6 @@ export default function CanteenManagementScreen({ route, navigation }) {
             })
             .eq('id', existingBill.id);
         } else {
-          // Criar nova fatura
           await supabase
             .from('canteen_bills')
             .insert([{
@@ -347,8 +399,10 @@ export default function CanteenManagementScreen({ route, navigation }) {
   const getStatusColor = (status) => {
     switch (status) {
       case 'paid': return theme.colors.success;
-      case 'pending': return theme.colors.warning;
+      case 'pending': 
+      case 'open': return theme.colors.warning;
       case 'overdue': return theme.colors.error;
+      case 'closed': return theme.colors.info;
       default: return theme.colors.text.secondary;
     }
   };
@@ -357,7 +411,9 @@ export default function CanteenManagementScreen({ route, navigation }) {
     switch (status) {
       case 'paid': return 'Pago';
       case 'pending': return 'Pendente';
-      case 'overdue': return 'Vencido';
+      case 'open': return 'Aberta';
+      case 'closed': return 'Fechada';
+      case 'overdue': return 'Vencida';
       default: return status;
     }
   };
@@ -493,6 +549,11 @@ export default function CanteenManagementScreen({ route, navigation }) {
               Vencimento: {formatDate(item.due_date)}
             </Text>
           )}
+          {item.payment_date && (
+            <Text style={[styles.billPaidDate, { color: theme.colors.success }]}>
+              ✅ Pago em: {formatDate(item.payment_date)}
+            </Text>
+          )}
         </View>
         <View style={styles.billAmount}>
           <Text style={[styles.billTotal, { color: theme.colors.success }]}>
@@ -517,10 +578,25 @@ export default function CanteenManagementScreen({ route, navigation }) {
               Copiar PIX
             </Text>
           </TouchableOpacity>
-          <Text style={[styles.pixKey, { color: theme.colors.text.secondary }]}>
-            {theme.school.shortName}: {pixKey}
-          </Text>
+          
+          {userRole === 'teacher' && (
+            <TouchableOpacity 
+              style={[styles.confirmButton, { backgroundColor: theme.colors.success }]} 
+              onPress={() => handleConfirmPayment(item)}
+            >
+              <Ionicons name="checkmark-circle" size={16} color="white" />
+              <Text style={[styles.confirmButtonText, { color: 'white' }]}>
+                Confirmar Pago
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
+      )}
+      
+      {item.status !== 'paid' && (
+        <Text style={[styles.pixKey, { color: theme.colors.text.secondary }]}>
+          {theme.school.shortName}: {pixKey}
+        </Text>
       )}
     </View>
   );
@@ -609,7 +685,7 @@ export default function CanteenManagementScreen({ route, navigation }) {
         visible={itemModalVisible}
         onRequestClose={() => setItemModalVisible(false)}
       >
-        <View style={styles.modalContainer}>
+        <View style={[styles.modalContainer, { backgroundColor: theme.colors.backdrop }]}>
           <View style={[styles.modalContent, { backgroundColor: theme.colors.card }]}>
             <View style={styles.modalHeader}>
               <Text style={[styles.modalTitle, { color: theme.colors.text.primary }]}>
@@ -717,7 +793,7 @@ export default function CanteenManagementScreen({ route, navigation }) {
         visible={consumptionModalVisible}
         onRequestClose={() => setConsumptionModalVisible(false)}
       >
-        <View style={styles.modalContainer}>
+        <View style={[styles.modalContainer, { backgroundColor: theme.colors.backdrop }]}>
           <View style={[styles.modalContent, { backgroundColor: theme.colors.card }]}>
             <View style={styles.modalHeader}>
               <Text style={[styles.modalTitle, { color: theme.colors.text.primary }]}>
@@ -1058,6 +1134,10 @@ const styles = StyleSheet.create({
     fontSize: theme.typography.small.fontSize,
     marginTop: 2,
   },
+  billPaidDate: {
+    fontSize: theme.typography.small.fontSize,
+    marginTop: 2,
+  },
   billAmount: {
     alignItems: 'flex-end',
   },
@@ -1086,10 +1166,22 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     fontSize: theme.typography.small.fontSize,
   },
+  confirmButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    borderRadius: theme.borderRadius.md,
+    marginLeft: theme.spacing.sm,
+  },
+  confirmButtonText: {
+    marginLeft: 5,
+    fontWeight: 'bold',
+    fontSize: theme.typography.small.fontSize,
+  },
   pixKey: {
     fontSize: theme.typography.small.fontSize,
-    flex: 1,
-    textAlign: 'right',
+    marginTop: 8,
   },
   statusBadge: {
     paddingHorizontal: theme.spacing.sm,
@@ -1122,7 +1214,6 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: theme.colors.backdrop,
   },
   modalContent: {
     width: '90%',

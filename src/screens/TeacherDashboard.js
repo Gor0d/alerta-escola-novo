@@ -26,7 +26,6 @@ export default function TeacherDashboard({ navigation }) {
   const { unreadCount, notifications: contextNotifications, respondToPickup } = useNotifications();
   const insets = useSafeAreaInsets();
   
-  // Estados existentes
   const [classes, setClasses] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -35,7 +34,6 @@ export default function TeacherDashboard({ navigation }) {
   const [newClassName, setNewClassName] = useState('');
   const [schoolYear, setSchoolYear] = useState('2025');
 
-  // NOVOS Estados para funcionalidades integradas
   const [recentAnnouncements, setRecentAnnouncements] = useState([]);
   const [canteenSummary, setCanteenSummary] = useState({
     totalSales: 0,
@@ -52,7 +50,6 @@ export default function TeacherDashboard({ navigation }) {
     fetchData();
   }, []);
 
-  // Sincronizar notificações do contexto
   useEffect(() => {
     if (contextNotifications) {
       const pendingNotifications = contextNotifications.filter(n => n.status === 'pending');
@@ -79,8 +76,6 @@ export default function TeacherDashboard({ navigation }) {
 
   const fetchClasses = async () => {
     try {
-      console.log('Buscando turmas para o professor:', user.id);
-      
       const { data, error } = await supabase
         .from('classes')
         .select('*')
@@ -114,7 +109,6 @@ export default function TeacherDashboard({ navigation }) {
     }
   };
 
-  // NOVA: Buscar avisos recentes (usando tabela 'notices' como no ParentDashboard)
   const fetchRecentAnnouncements = async () => {
     try {
       const { data, error } = await supabase
@@ -133,15 +127,12 @@ export default function TeacherDashboard({ navigation }) {
     }
   };
 
-  // NOVA: Buscar resumo da cantina (usando mesma estrutura do ParentDashboard)
   const fetchCanteenSummary = async () => {
     try {
-      // Buscar todas as transações do mês atual
       const startOfMonth = new Date();
       startOfMonth.setDate(1);
       startOfMonth.setHours(0, 0, 0, 0);
 
-      // Buscar faturas pendentes (mesma lógica do ParentDashboard)
       const { data: bills, error: billsError } = await supabase
         .from('canteen_bills')
         .select('total_amount')
@@ -150,7 +141,6 @@ export default function TeacherDashboard({ navigation }) {
 
       if (billsError) throw billsError;
 
-      // Buscar consumos para estatísticas
       const { data: consumptions, error: consumptionsError } = await supabase
         .from('canteen_consumption')
         .select('total_price, consumed_at')
@@ -158,7 +148,6 @@ export default function TeacherDashboard({ navigation }) {
 
       if (consumptionsError) throw consumptionsError;
 
-      // Buscar transações de hoje
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const tomorrow = new Date(today);
@@ -186,14 +175,12 @@ export default function TeacherDashboard({ navigation }) {
     }
   };
 
-  // NOVA: Buscar estatísticas rápidas
   const fetchQuickStats = async () => {
     try {
-      // Total de estudantes em todas as turmas do professor
       const classIds = classes.map(c => c.id);
       
       if (classIds.length === 0) {
-        setQuickStats({ totalStudents: 0, presentToday: 0, pendingPickups: 0 });
+        setQuickStats({ totalStudents: 0, presentToday: 0, pendingPickups: unreadCount });
         return;
       }
 
@@ -202,7 +189,6 @@ export default function TeacherDashboard({ navigation }) {
         .select('*', { count: 'exact', head: true })
         .in('class_id', classIds);
 
-      // Presenças de hoje
       const today = new Date().toISOString().split('T')[0];
       const { count: presentToday } = await supabase
         .from('attendances')
@@ -218,7 +204,7 @@ export default function TeacherDashboard({ navigation }) {
       });
     } catch (error) {
       console.error('Erro ao buscar estatísticas:', error);
-      setQuickStats({ totalStudents: 0, presentToday: 0, pendingPickups: 0 });
+      setQuickStats({ totalStudents: 0, presentToday: 0, pendingPickups: unreadCount });
     }
   };
 
@@ -279,46 +265,37 @@ export default function TeacherDashboard({ navigation }) {
 
   const confirmDeleteClass = async (classToDelete) => {
     try {
-      // Excluir presenças
+      // 1. Excluir frequências
       await supabase
         .from('attendances')
         .delete()
         .eq('class_id', classToDelete.id);
 
-      // Buscar estudantes para excluir notificações
-      const { data: enrollments } = await supabase
-        .from('enrollments')
-        .select('student_id')
+      // 2. Excluir notificações relacionadas
+      await supabase
+        .from('pickup_notifications')
+        .delete()
         .eq('class_id', classToDelete.id);
 
-      if (enrollments && enrollments.length > 0) {
-        const studentIds = enrollments.map(e => e.student_id);
-        await supabase
-          .from('pickup_notifications')
-          .delete()
-          .in('student_id', studentIds);
-      }
-
-      // Excluir matrículas
+      // 3. Excluir matrículas
       await supabase
         .from('enrollments')
         .delete()
         .eq('class_id', classToDelete.id);
 
-      // Excluir turma
+      // 4. Excluir turma
       const { error } = await supabase
         .from('classes')
         .delete()
-        .eq('id', classToDelete.id)
-        .eq('teacher_id', user.id);
+        .eq('id', classToDelete.id);
 
       if (error) throw error;
 
       setClasses(classes.filter(c => c.id !== classToDelete.id));
-      Alert.alert('Sucesso', `A turma "${classToDelete.name}" foi excluída com sucesso!`);
+      Alert.alert('Sucesso', `Turma "${classToDelete.name}" excluída!`);
     } catch (error) {
       console.error('Erro ao excluir turma:', error);
-      Alert.alert('Erro', `Não foi possível excluir a turma: ${error.message}`);
+      Alert.alert('Erro', 'Não foi possível excluir a turma: ' + error.message);
     }
   };
 
@@ -355,7 +332,6 @@ export default function TeacherDashboard({ navigation }) {
     );
   };
 
-  // NOVAS: Funções para navegação (usando rotas do ParentDashboard)
   const handleCreateAnnouncement = () => {
     navigation.navigate('NoticeBoardScreen', { userRole: 'teacher' });
   };
@@ -368,7 +344,6 @@ export default function TeacherDashboard({ navigation }) {
     navigation.navigate('NoticeBoardScreen', { userRole: 'teacher' });
   };
 
-  // Utilitários
   const formatCurrency = (value) => {
     return new Intl.NumberFormat('pt-BR', {
       style: 'currency',
@@ -386,7 +361,6 @@ export default function TeacherDashboard({ navigation }) {
     });
   };
 
-  // Render functions
   const renderClassCard = (classItem) => {
     const studentCount = classItem.enrollments?.length || 0;
 
@@ -473,7 +447,7 @@ export default function TeacherDashboard({ navigation }) {
 
         <Text style={styles.notificationText}>
           <Text style={styles.notificationBold}>
-            {notification.parent_profiles?.name || 'Responsável'}
+            {notification.profiles?.name || 'Responsável'}
           </Text>
           {' '}solicitou a busca de{' '}
           <Text style={styles.notificationBold}>
@@ -505,7 +479,6 @@ export default function TeacherDashboard({ navigation }) {
     );
   };
 
-  // NOVA: Render de avisos recentes (seguindo estrutura do ParentDashboard)
   const renderAnnouncementCard = (notice) => {
     return (
       <View key={notice.id} style={styles.announcementCard}>
@@ -544,7 +517,6 @@ export default function TeacherDashboard({ navigation }) {
         translucent={false}
       />
       
-      {/* Header */}
       <View style={[styles.header, { 
         paddingTop: Math.max(insets.top, Platform.OS === 'ios' ? 44 : 24) + 12 
       }]}>
@@ -572,7 +544,6 @@ export default function TeacherDashboard({ navigation }) {
         </View>
       </View>
 
-      {/* Resumo de notificações pendentes */}
       {unreadCount > 0 && (
         <View style={styles.notificationSummary}>
           <Ionicons name="alert-circle" size={20} color="#f59e0b" />
@@ -595,7 +566,6 @@ export default function TeacherDashboard({ navigation }) {
         }
         showsVerticalScrollIndicator={false}
       >
-        {/* NOVO: Ações Rápidas */}
         <View style={styles.quickActionsContainer}>
           <Text style={styles.sectionTitle}>Ações Rápidas</Text>
           <View style={styles.quickActionsGrid}>
@@ -646,7 +616,6 @@ export default function TeacherDashboard({ navigation }) {
           </View>
         </View>
 
-        {/* NOVO: Resumo Dashboard */}
         <View style={styles.summaryContainer}>
           <View style={styles.summaryCard}>
             <Ionicons name="school" size={24} color={theme.colors.primary} />
@@ -675,7 +644,6 @@ export default function TeacherDashboard({ navigation }) {
           </View>
         </View>
 
-        {/* NOVO: Avisos Recentes */}
         {recentAnnouncements.length > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
@@ -691,7 +659,6 @@ export default function TeacherDashboard({ navigation }) {
           </View>
         )}
 
-        {/* NOVO: Resumo da Cantina */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Resumo da Cantina</Text>
@@ -729,7 +696,6 @@ export default function TeacherDashboard({ navigation }) {
           </View>
         </View>
 
-        {/* Notificações pendentes */}
         {notifications.length > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
@@ -745,7 +711,6 @@ export default function TeacherDashboard({ navigation }) {
           </View>
         )}
 
-        {/* Minhas turmas */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Minhas Turmas</Text>
@@ -783,7 +748,6 @@ export default function TeacherDashboard({ navigation }) {
         <View style={styles.bottomSpacing} />
       </ScrollView>
 
-      {/* Modal para adicionar turma */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -945,7 +909,6 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
   },
-  // NOVO: Estilos para Ações Rápidas
   quickActionsContainer: {
     paddingHorizontal: theme.spacing.lg,
     paddingTop: theme.spacing.lg,
@@ -1071,7 +1034,6 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
-  // NOVO: Estilos para cards de avisos
   announcementCard: {
     backgroundColor: 'white',
     borderRadius: theme.borderRadius.md,
@@ -1112,7 +1074,6 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontStyle: 'italic',
   },
-  // NOVO: Estilos para resumo da cantina
   canteenSummaryCard: {
     backgroundColor: 'white',
     borderRadius: theme.borderRadius.md,
