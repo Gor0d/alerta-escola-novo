@@ -10,37 +10,50 @@ import {
   RefreshControl,
   ActivityIndicator,
   Platform,
-  StatusBar
+  StatusBar,
+  Clipboard
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
-import { useNotifications } from '../contexts/NotificationContext'; // NOVO
-import { NotificationBadge } from '../components/NotificationBadge'; // NOVO
+import { useNotifications } from '../contexts/NotificationContext';
+import { NotificationBadge } from '../components/NotificationBadge';
 import { supabase } from '../services/supabase';
 import { theme } from '../styles/theme';
 
 export default function ParentDashboard({ navigation }) {
   const { signOut, profile, user } = useAuth();
-  const { sendPickupNotification: sendNotification, unreadCount } = useNotifications(); // NOVO
+  const { sendPickupNotification: sendNotification, unreadCount } = useNotifications();
   const insets = useSafeAreaInsets();
   const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [sendingNotification, setSendingNotification] = useState(null);
   const [deletingStudent, setDeletingStudent] = useState(null);
+  
+  // Estados para novas funcionalidades
+  const [recentNotices, setRecentNotices] = useState([]);
+  const [canteenSummary, setCanteenSummary] = useState({
+    totalDebt: 0,
+    pendingItems: 0,
+    recentConsumptions: []
+  });
+  const [pixKey, setPixKey] = useState('');
 
-useEffect(() => {
-  fetchStudents();
-}, []);
+  useEffect(() => {
+    fetchStudents();
+    fetchRecentNotices();
+    fetchCanteenSummary();
+    fetchPixKey();
+  }, []);
 
+  // Função original do fetchStudents mantida
   const fetchStudents = async () => {
     try {
       setLoading(true);
       console.log('=== BUSCANDO FILHOS DO RESPONSÁVEL ===');
       console.log('Parent ID:', user.id);
       
-      // Buscar filhos do responsável logado
       const { data: studentsData, error: studentsError } = await supabase
         .from('students')
         .select('*')
@@ -65,21 +78,16 @@ useEffect(() => {
           try {
             console.log(`=== PROCESSANDO ALUNO: ${student.name} ===`);
             
-            // CORREÇÃO: Buscar enrollment sem filtrar por status específico
-            // Aceitar qualquer status válido de matrícula
             const { data: enrollment, error: enrollmentError } = await supabase
               .from('enrollments')
               .select('class_id, status')
               .eq('student_id', student.id)
-              // REMOVIDO: .eq('status', 'active') 
-              // ADICIONADO: Filtro mais amplo para status válidos
               .in('status', ['active', 'present', 'absent', 'enrolled'])
               .single();
 
             if (enrollmentError) {
               console.log(`❌ Erro ao buscar matrícula para ${student.name}:`, enrollmentError);
               
-              // Tentar buscar qualquer enrollment, independente do status
               const { data: anyEnrollment, error: anyError } = await supabase
                 .from('enrollments')
                 .select('class_id, status')
@@ -96,18 +104,16 @@ useEffect(() => {
                   teacherId: null,
                   attendanceStatus: 'inactive',
                   classId: null,
-                  canDelete: true // NOVO: Permitir exclusão quando não tem turma
+                  canDelete: true
                 };
               }
               
               console.log(`⚠️ Matrícula encontrada com status: ${anyEnrollment.status}`);
-              // Usar a matrícula encontrada, mesmo com status diferente
               enrollment = anyEnrollment;
             }
 
             console.log(`✅ Matrícula encontrada para ${student.name}:`, enrollment);
 
-            // Buscar dados da turma
             const { data: classData, error: classError } = await supabase
               .from('classes')
               .select('id, name, teacher_id, school_year')
@@ -123,13 +129,12 @@ useEffect(() => {
                 teacherId: null,
                 attendanceStatus: enrollment.status || 'active',
                 classId: null,
-                canDelete: true // NOVO: Permitir exclusão quando não tem turma válida
+                canDelete: true
               };
             }
 
             console.log(`✅ Turma encontrada:`, classData);
 
-            // Buscar dados do professor
             const { data: teacherData, error: teacherError } = await supabase
               .from('profiles')
               .select('name')
@@ -148,7 +153,7 @@ useEffect(() => {
               teacherId: classData.teacher_id,
               attendanceStatus: enrollment.status || 'active',
               classId: classData.id,
-              canDelete: false // NOVO: NÃO permitir exclusão quando tem turma ativa
+              canDelete: false
             };
 
             console.log(`✅ Dados finais para ${student.name}:`, result);
@@ -163,7 +168,7 @@ useEffect(() => {
               teacherId: null,
               attendanceStatus: 'inactive',
               classId: null,
-              canDelete: true // NOVO: Permitir exclusão em caso de erro
+              canDelete: true
             };
           }
         })
@@ -183,19 +188,117 @@ useEffect(() => {
     }
   };
 
+  // NOVA FUNÇÃO: Buscar avisos recentes
+  const fetchRecentNotices = async () => {
+    try {
+      const classIds = students.map(s => s.classId).filter(Boolean);
+      
+      if (classIds.length === 0) return;
+
+      const { data, error } = await supabase
+        .from('notices')
+        .select(`
+          *,
+          author:profiles(name),
+          class:classes(name)
+        `)
+        .or(`class_id.in.(${classIds.join(',')}),class_id.is.null`)
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      if (error) throw error;
+      setRecentNotices(data || []);
+    } catch (error) {
+      console.error('Erro ao buscar avisos:', error);
+    }
+  };
+
+  // NOVA FUNÇÃO: Buscar resumo da cantina
+  const fetchCanteenSummary = async () => {
+    try {
+      const studentIds = students.map(s => s.id).filter(Boolean);
+      
+      if (studentIds.length === 0) return;
+
+      // Buscar faturas pendentes
+      const { data: bills, error: billsError } = await supabase
+        .from('canteen_bills')
+        .select('total_amount')
+        .in('student_id', studentIds)
+        .neq('status', 'paid');
+
+      if (billsError) throw billsError;
+
+      // Buscar consumos recentes
+      const { data: consumptions, error: consumptionsError } = await supabase
+        .from('canteen_consumption')
+        .select(`
+          *,
+          student:students(name),
+          item:canteen_items(name)
+        `)
+        .in('student_id', studentIds)
+        .eq('payment_status', 'pending')
+        .order('consumed_at', { ascending: false })
+        .limit(5);
+
+      if (consumptionsError) throw consumptionsError;
+
+      const totalDebt = bills?.reduce((sum, bill) => sum + bill.total_amount, 0) || 0;
+      
+      setCanteenSummary({
+        totalDebt,
+        pendingItems: consumptions?.length || 0,
+        recentConsumptions: consumptions || []
+      });
+
+    } catch (error) {
+      console.error('Erro ao buscar resumo da cantina:', error);
+    }
+  };
+
+  // NOVA FUNÇÃO: Buscar chave PIX
+  const fetchPixKey = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('school_settings')
+        .select('setting_value')
+        .eq('setting_key', 'pix_key')
+        .single();
+      
+      if (error) throw error;
+      if (data) setPixKey(data.setting_value);
+    } catch (error) {
+      console.error('Erro ao buscar chave PIX:', error);
+    }
+  };
+
+  // NOVA FUNÇÃO: Copiar chave PIX
+  const copyPixKey = () => {
+    Clipboard.setString(pixKey);
+    Alert.alert(
+      'PIX Copiado!', 
+      `Chave PIX do ${theme.school.shortName} copiada para a área de transferência`
+    );
+  };
+
+  // Função de refresh atualizada
   const onRefresh = () => {
     setRefreshing(true);
     fetchStudents();
+    fetchRecentNotices();
+    fetchCanteenSummary();
+    fetchPixKey();
   };
 
-  // FUNÇÃO ATUALIZADA: Usar o hook de notificações
+  // Funções originais mantidas
   const sendPickupNotification = async (student) => {
     if (!student.teacherId || !student.classId) {
       Alert.alert('Erro', 'Não foi possível enviar notificação. Dados do professor não encontrados.');
       return;
     }
 
-    // NOVO: Input personalizado para motivo
     Alert.prompt(
       'Notificar Busca',
       `Informe o motivo da busca de ${student.name}:`,
@@ -207,7 +310,6 @@ useEffect(() => {
             try {
               setSendingNotification(student.id);
               
-              // USAR o hook de notificações
               await sendNotification(
                 student.id, 
                 student.teacherId, 
@@ -228,11 +330,10 @@ useEffect(() => {
         }
       ],
       'plain-text',
-      'Consulta médica' // Texto padrão
+      'Consulta médica'
     );
   };
 
-  // NOVA FUNÇÃO: Excluir aluno do perfil do responsável
   const deleteStudent = async (student) => {
     Alert.alert(
       'Remover Filho',
@@ -247,9 +348,6 @@ useEffect(() => {
               setDeletingStudent(student.id);
               console.log(`=== REMOVENDO ALUNO ${student.name} ===`);
               
-              // PRIMEIRO: Limpar todas as dependências do aluno
-              
-              // 1. Remover notificações de busca relacionadas ao aluno
               const { error: pickupError } = await supabase
                 .from('pickup_notifications')
                 .delete()
@@ -257,10 +355,8 @@ useEffect(() => {
               
               if (pickupError) {
                 console.log('Aviso: Erro ao limpar notificações de busca:', pickupError);
-                // Não bloquear por isso, continuar tentando outras limpezas
               }
               
-              // 2. Remover matrículas (enrollments)
               const { error: enrollmentError } = await supabase
                 .from('enrollments')
                 .delete()
@@ -268,15 +364,13 @@ useEffect(() => {
               
               if (enrollmentError) {
                 console.log('Aviso: Erro ao limpar matrículas:', enrollmentError);
-                // Não bloquear por isso, continuar
               }
               
-              // FINALMENTE: Deletar o aluno (agora sem dependências)
               const { error: deleteError } = await supabase
                 .from('students')
                 .delete()
                 .eq('id', student.id)
-                .eq('parent_id', user.id); // Garantir que só o responsável pode remover
+                .eq('parent_id', user.id);
 
               if (deleteError) {
                 console.error('Erro ao deletar aluno:', deleteError);
@@ -285,7 +379,6 @@ useEffect(() => {
 
               console.log(`✅ Aluno ${student.name} removido com sucesso`);
               
-              // Atualizar a lista local (remover da UI)
               setStudents(students.filter(s => s.id !== student.id));
 
               Alert.alert(
@@ -344,6 +437,126 @@ useEffect(() => {
       case 'removed': return 'Desvinculado';
       default: return 'Sem Turma';
     }
+  };
+
+  const formatCurrency = (value) => {
+    return new Intl.NumberFormat('pt-BR', {
+      style: 'currency',
+      currency: 'BRL'
+    }).format(value);
+  };
+
+  const formatDate = (dateString) => {
+    return new Date(dateString).toLocaleDateString('pt-BR');
+  };
+
+  const getNoticeTypeColor = (type) => {
+    switch (type) {
+      case 'urgent': return theme.colors.error;
+      case 'event': return theme.colors.success;
+      case 'announcement': return theme.colors.warning;
+      default: return theme.colors.info;
+    }
+  };
+
+  // NOVO: Renderizar avisos recentes
+  const renderRecentNotices = () => {
+    if (recentNotices.length === 0) return null;
+
+    return (
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Avisos Recentes</Text>
+          <TouchableOpacity 
+            onPress={() => navigation.navigate('NoticeBoardScreen', { userRole: 'parent' })}
+          >
+            <Text style={styles.seeAllText}>Ver todos</Text>
+          </TouchableOpacity>
+        </View>
+        
+        {recentNotices.slice(0, 2).map((notice) => (
+          <View key={notice.id} style={styles.noticeCard}>
+            <View style={styles.noticeHeader}>
+              <View style={[
+                styles.noticeIcon,
+                { backgroundColor: getNoticeTypeColor(notice.type) + '20' }
+              ]}>
+                <Ionicons 
+                  name={notice.type === 'urgent' ? 'warning' : 
+                        notice.type === 'event' ? 'calendar' : 'megaphone'} 
+                  size={16} 
+                  color={getNoticeTypeColor(notice.type)} 
+                />
+              </View>
+              <View style={styles.noticeInfo}>
+                <Text style={styles.noticeTitle}>{notice.title}</Text>
+                <Text style={styles.noticeAuthor}>
+                  Por: {notice.author?.name} • {formatDate(notice.created_at)}
+                </Text>
+                {notice.class?.name && (
+                  <Text style={styles.noticeClass}>Turma: {notice.class.name}</Text>
+                )}
+              </View>
+            </View>
+            <Text style={styles.noticeContent} numberOfLines={2}>
+              {notice.content}
+            </Text>
+          </View>
+        ))}
+      </View>
+    );
+  };
+
+  // NOVO: Renderizar resumo da cantina
+  const renderCanteenSummary = () => {
+    if (canteenSummary.totalDebt === 0 && canteenSummary.pendingItems === 0) return null;
+
+    return (
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Cantina</Text>
+          <TouchableOpacity 
+            onPress={() => navigation.navigate('CanteenManagementScreen', { 
+              userRole: 'parent',
+              studentId: students[0]?.id 
+            })}
+          >
+            <Text style={styles.seeAllText}>Ver detalhes</Text>
+          </TouchableOpacity>
+        </View>
+        
+        {canteenSummary.totalDebt > 0 && (
+          <View style={styles.debtCard}>
+            <View style={styles.debtInfo}>
+              <Text style={styles.debtTitle}>Total a Pagar</Text>
+              <Text style={styles.debtAmount}>{formatCurrency(canteenSummary.totalDebt)}</Text>
+              <Text style={styles.schoolName}>{theme.school.shortName}</Text>
+            </View>
+            <TouchableOpacity style={styles.pixButton} onPress={copyPixKey}>
+              <Ionicons name="copy" size={16} color={theme.colors.primary} />
+              <Text style={styles.pixButtonText}>Copiar PIX</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {canteenSummary.recentConsumptions.length > 0 && (
+          <View style={styles.consumptionsPreview}>
+            <Text style={styles.consumptionsTitle}>Consumos Recentes:</Text>
+            {canteenSummary.recentConsumptions.slice(0, 3).map((consumption) => (
+              <View key={consumption.id} style={styles.consumptionItem}>
+                <Text style={styles.consumptionStudent}>{consumption.student?.name}</Text>
+                <Text style={styles.consumptionDetails}>
+                  {consumption.item?.name} • Qtd: {consumption.quantity}
+                </Text>
+                <Text style={styles.consumptionPrice}>
+                  {formatCurrency(consumption.total_price)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    );
   };
 
   const renderStudentCard = (student) => {
@@ -407,7 +620,6 @@ useEffect(() => {
                 {' '}Entre em contato com a escola para reativar
               </Text>
             )}
-            {/* NOVO: Mostrar que pode ser removido */}
             {canDelete && (
               <Text style={styles.deleteHintText}>
                 <Ionicons name="trash-outline" size={12} color={theme.colors.error} />
@@ -422,7 +634,6 @@ useEffect(() => {
             ]}>
               <Text style={styles.statusText}>{getStatusText(student.attendanceStatus)}</Text>
             </View>
-            {/* NOVO: Botão de excluir (só para alunos sem turma) */}
             {canDelete && (
               <TouchableOpacity
                 style={styles.deleteButton}
@@ -511,14 +722,12 @@ useEffect(() => {
 
   return (
     <View style={styles.container}>
-      {/* Status Bar - Configuração para o gradiente funcionar */}
       <StatusBar 
         barStyle="light-content" 
         backgroundColor={theme.colors.primary}
         translucent={false}
       />
       
-      {/* Header com Safe Area customizada */}
       <View style={[styles.header, { 
         paddingTop: Math.max(insets.top, Platform.OS === 'ios' ? 44 : 24) + 12 
       }]}>
@@ -527,12 +736,10 @@ useEffect(() => {
             <Text style={styles.greeting} numberOfLines={1} adjustsFontSizeToFit>
               Olá, {profile?.name}! 👋
             </Text>
-            <Text style={styles.subGreeting}>Acompanhe seus filhos</Text>
+            <Text style={styles.subGreeting}>{theme.school.shortName}</Text>
           </View>
           
-          {/* NOVO: Botões do header */}
           <View style={styles.headerActions}>
-            {/* Botão de notificações com badge */}
             <TouchableOpacity 
               style={styles.notificationButton} 
               onPress={() => navigation.navigate('Notifications')}
@@ -541,7 +748,6 @@ useEffect(() => {
               <NotificationBadge />
             </TouchableOpacity>
             
-            {/* Botão de logout existente */}
             <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
               <Ionicons name="log-out-outline" size={24} color="white" />
             </TouchableOpacity>
@@ -549,7 +755,6 @@ useEffect(() => {
         </View>
       </View>
 
-      {/* NOVO: Resumo de notificações pendentes */}
       {unreadCount > 0 && (
         <View style={styles.notificationSummary}>
           <Ionicons name="notifications" size={20} color="#f59e0b" />
@@ -565,7 +770,6 @@ useEffect(() => {
         </View>
       )}
 
-      {/* Conteúdo */}
       <ScrollView
         style={styles.content}
         refreshControl={
@@ -573,7 +777,7 @@ useEffect(() => {
         }
         showsVerticalScrollIndicator={false}
       >
-        {/* Resumo rápido */}
+        {/* Resumo rápido atualizado */}
         <View style={styles.summaryContainer}>
           <View style={styles.summaryCard}>
             <Ionicons name="people" size={24} color={theme.colors.primary} />
@@ -582,21 +786,31 @@ useEffect(() => {
           </View>
 
           <View style={styles.summaryCard}>
-            <Ionicons name="checkmark-circle" size={24} color={theme.colors.success} />
-            <Text style={styles.summaryNumber}>
-              {students.filter(s => s.attendanceStatus === 'present').length}
-            </Text>
-            <Text style={styles.summaryLabel}>Presentes</Text>
+            <Ionicons name="newspaper" size={24} color={theme.colors.success} />
+            <Text style={styles.summaryNumber}>{recentNotices.length}</Text>
+            <Text style={styles.summaryLabel}>Avisos</Text>
           </View>
 
           <View style={styles.summaryCard}>
-            <Ionicons name="school" size={24} color={theme.colors.secondary} />
-            <Text style={styles.summaryNumber}>
-              {students.filter(s => s.classId).length}
+            <Ionicons name="restaurant" size={24} color={theme.colors.warning} />
+            <Text style={styles.summaryNumber}>{canteenSummary.pendingItems}</Text>
+            <Text style={styles.summaryLabel}>Pendências</Text>
+          </View>
+
+          <View style={styles.summaryCard}>
+            <Ionicons name="card" size={24} color={theme.colors.error} />
+            <Text style={[styles.summaryNumber, { fontSize: 14 }]}>
+              {formatCurrency(canteenSummary.totalDebt)}
             </Text>
-            <Text style={styles.summaryLabel}>Matriculados</Text>
+            <Text style={styles.summaryLabel}>A Pagar</Text>
           </View>
         </View>
+
+        {/* NOVO: Avisos recentes */}
+        {renderRecentNotices()}
+
+        {/* NOVO: Resumo da cantina */}
+        {renderCanteenSummary()}
 
         {/* Lista de filhos */}
         <View style={styles.section}>
@@ -627,7 +841,7 @@ useEffect(() => {
           )}
         </View>
 
-        {/* Ações rápidas */}
+        {/* Ações rápidas atualizadas */}
         {students.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Ações Rápidas</Text>
@@ -663,15 +877,27 @@ useEffect(() => {
                 <Text style={styles.quickActionText}>Notificar Busca</Text>
               </TouchableOpacity>
 
+              {/* NOVO: Botão para mural de avisos */}
               <TouchableOpacity 
                 style={styles.quickActionCard}
-                onPress={() => onRefresh()}
+                onPress={() => navigation.navigate('NoticeBoardScreen', { userRole: 'parent' })}
               >
-                <Ionicons name="refresh-circle" size={32} color={theme.colors.success} />
-                <Text style={styles.quickActionText}>Atualizar Dados</Text>
+                <Ionicons name="newspaper" size={32} color={theme.colors.success} />
+                <Text style={styles.quickActionText}>Ver Avisos</Text>
               </TouchableOpacity>
 
-              {/* NOVO: Botão para notificações */}
+              {/* NOVO: Botão para cantina */}
+              <TouchableOpacity 
+                style={styles.quickActionCard}
+                onPress={() => navigation.navigate('CanteenManagementScreen', { 
+                  userRole: 'parent',
+                  studentId: students[0]?.id 
+                })}
+              >
+                <Ionicons name="restaurant" size={32} color={theme.colors.warning} />
+                <Text style={styles.quickActionText}>Cantina</Text>
+              </TouchableOpacity>
+
               <TouchableOpacity 
                 style={styles.quickActionCard}
                 onPress={() => navigation.navigate('Notifications')}
@@ -686,7 +912,6 @@ useEffect(() => {
           </View>
         )}
 
-        {/* Espaço extra no final para scroll confortável */}
         <View style={styles.bottomSpacing} />
       </ScrollView>
     </View>
@@ -702,7 +927,6 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.primary,
     paddingBottom: theme.spacing.lg,
     paddingHorizontal: theme.spacing.lg,
-    // Sombra para destacar do conteúdo
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -722,7 +946,6 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 20,
     fontWeight: 'bold',
-    // Garantir que o texto seja legível
     textShadowColor: 'rgba(0, 0, 0, 0.3)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
@@ -736,7 +959,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 1,
   },
-  // NOVO: Estilos para os botões do header
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -750,7 +972,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     position: 'relative',
-    // Sombra para destaque
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -764,14 +985,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
-    // Pequena sombra para destaque
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
   },
-  // NOVO: Resumo de notificações
   notificationSummary: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -808,26 +1027,27 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     paddingHorizontal: theme.spacing.lg,
     paddingTop: theme.spacing.lg,
-    gap: theme.spacing.md,
+    gap: theme.spacing.sm,
   },
   summaryCard: {
     flex: 1,
     backgroundColor: 'white',
-    padding: theme.spacing.md,
+    padding: theme.spacing.sm,
     borderRadius: theme.borderRadius.md,
     alignItems: 'center',
     ...theme.shadows.small,
   },
   summaryNumber: {
-    fontSize: 24,
+    fontSize: 18,
     fontWeight: 'bold',
     color: theme.colors.text.primary,
-    marginTop: theme.spacing.sm,
+    marginTop: theme.spacing.xs,
   },
   summaryLabel: {
-    fontSize: 12,
+    fontSize: 10,
     color: theme.colors.text.secondary,
     marginTop: 4,
+    textAlign: 'center',
   },
   section: {
     paddingHorizontal: theme.spacing.lg,
@@ -838,6 +1058,143 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: theme.colors.text.primary,
     marginBottom: theme.spacing.md,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: theme.spacing.md,
+  },
+  seeAllText: {
+    fontSize: 14,
+    color: theme.colors.primary,
+    fontWeight: '500',
+  },
+  // NOVOS: Estilos para avisos
+  noticeCard: {
+    backgroundColor: 'white',
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+    ...theme.shadows.small,
+  },
+  noticeHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: theme.spacing.sm,
+  },
+  noticeIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: theme.spacing.sm,
+  },
+  noticeInfo: {
+    flex: 1,
+  },
+  noticeTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
+  },
+  noticeAuthor: {
+    fontSize: 12,
+    color: theme.colors.text.secondary,
+    marginTop: 2,
+  },
+  noticeClass: {
+    fontSize: 12,
+    color: theme.colors.primary,
+    marginTop: 2,
+  },
+  noticeContent: {
+    fontSize: 14,
+    color: theme.colors.text.primary,
+    lineHeight: 20,
+  },
+  // NOVOS: Estilos para cantina
+  debtCard: {
+    backgroundColor: '#fef3c7',
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.md,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: theme.spacing.md,
+  },
+  debtInfo: {
+    flex: 1,
+  },
+  debtTitle: {
+    fontSize: 14,
+    color: '#92400e',
+    fontWeight: '500',
+  },
+  debtAmount: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#92400e',
+    marginTop: 2,
+  },
+  schoolName: {
+    fontSize: 12,
+    color: '#92400e',
+    marginTop: 2,
+  },
+  pixButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'white',
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
+    borderRadius: theme.borderRadius.md,
+  },
+  pixButtonText: {
+    marginLeft: 5,
+    color: theme.colors.primary,
+    fontWeight: '500',
+    fontSize: 12,
+  },
+  consumptionsPreview: {
+    backgroundColor: 'white',
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.md,
+    ...theme.shadows.small,
+  },
+  consumptionsTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
+    marginBottom: theme.spacing.sm,
+  },
+  consumptionItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: theme.spacing.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.divider,
+  },
+  consumptionStudent: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
+    flex: 1,
+  },
+  consumptionDetails: {
+    fontSize: 12,
+    color: theme.colors.text.secondary,
+    flex: 2,
+    textAlign: 'center',
+  },
+  consumptionPrice: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: theme.colors.success,
+    flex: 1,
+    textAlign: 'right',
   },
   childCard: {
     backgroundColor: 'white',
@@ -906,7 +1263,6 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontStyle: 'italic',
   },
-  // NOVO: Estilo para texto de dica de exclusão
   deleteHintText: {
     fontSize: 11,
     color: theme.colors.error,
@@ -927,7 +1283,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
-  // NOVO: Botão de exclusão no canto superior direito
   deleteButton: {
     width: 32,
     height: 32,
@@ -962,7 +1317,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: theme.colors.border,
   },
-  // NOVO: Estilo para botão de exclusão
   deleteAction: {
     backgroundColor: theme.colors.error,
   },
@@ -980,7 +1334,6 @@ const styles = StyleSheet.create({
     color: theme.colors.text.secondary,
     fontSize: 14,
   },
-  // NOVO: Texto para botão de exclusão
   deleteActionText: {
     color: 'white',
     fontSize: 14,
@@ -992,18 +1345,18 @@ const styles = StyleSheet.create({
   },
   quickActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: theme.spacing.md,
     marginBottom: theme.spacing.xl,
   },
   quickActionCard: {
-    flex: 1,
+    width: '48%',
     backgroundColor: 'white',
     padding: theme.spacing.md,
     borderRadius: theme.borderRadius.md,
     alignItems: 'center',
     ...theme.shadows.small,
   },
-  // NOVO: Container para ícone com badge
   quickActionIconContainer: {
     position: 'relative',
   },

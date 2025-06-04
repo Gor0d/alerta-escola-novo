@@ -16,15 +16,17 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
-import { useNotifications } from '../contexts/NotificationContext'; // NOVO
-import { NotificationBadge } from '../components/NotificationBadge'; // NOVO
+import { useNotifications } from '../contexts/NotificationContext';
+import { NotificationBadge } from '../components/NotificationBadge';
 import { supabase } from '../services/supabase';
 import { theme } from '../styles/theme';
 
 export default function TeacherDashboard({ navigation }) {
   const { signOut, profile, user } = useAuth();
-  const { unreadCount, notifications: contextNotifications, respondToPickup } = useNotifications(); // NOVO
+  const { unreadCount, notifications: contextNotifications, respondToPickup } = useNotifications();
   const insets = useSafeAreaInsets();
+  
+  // Estados existentes
   const [classes, setClasses] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -33,14 +35,26 @@ export default function TeacherDashboard({ navigation }) {
   const [newClassName, setNewClassName] = useState('');
   const [schoolYear, setSchoolYear] = useState('2025');
 
+  // NOVOS Estados para funcionalidades integradas
+  const [recentAnnouncements, setRecentAnnouncements] = useState([]);
+  const [canteenSummary, setCanteenSummary] = useState({
+    totalSales: 0,
+    pendingPayments: 0,
+    todayTransactions: 0
+  });
+  const [quickStats, setQuickStats] = useState({
+    totalStudents: 0,
+    presentToday: 0,
+    pendingPickups: 0
+  });
+
   useEffect(() => {
     fetchData();
   }, []);
 
-  // NOVO: Sincronizar notificações do contexto
+  // Sincronizar notificações do contexto
   useEffect(() => {
     if (contextNotifications) {
-      // Filtrar apenas notificações pendentes para mostrar no dashboard
       const pendingNotifications = contextNotifications.filter(n => n.status === 'pending');
       setNotifications(pendingNotifications);
     }
@@ -51,7 +65,9 @@ export default function TeacherDashboard({ navigation }) {
       setLoading(true);
       await Promise.all([
         fetchClasses(),
-        // Removido fetchNotifications - agora usa o contexto
+        fetchRecentAnnouncements(),
+        fetchCanteenSummary(),
+        fetchQuickStats()
       ]);
     } catch (error) {
       console.error('Erro ao carregar dados:', error);
@@ -65,24 +81,16 @@ export default function TeacherDashboard({ navigation }) {
     try {
       console.log('Buscando turmas para o professor:', user.id);
       
-      // Query super simples - apenas turmas
       const { data, error } = await supabase
         .from('classes')
         .select('*')
         .eq('teacher_id', user.id)
         .order('created_at', { ascending: false });
 
-      if (error) {
-        console.error('Erro na query classes:', error);
-        throw error;
-      }
+      if (error) throw error;
 
-      console.log('Classes encontradas:', data);
-
-      // Para cada turma, contar alunos de forma simples
       const classesWithStudentCount = await Promise.all(
         (data || []).map(async (classItem) => {
-          // Contar apenas quantos enrollments existem
           const { count, error: countError } = await supabase
             .from('enrollments')
             .select('*', { count: 'exact', head: true })
@@ -93,21 +101,124 @@ export default function TeacherDashboard({ navigation }) {
             return { ...classItem, enrollments: [] };
           }
 
-          console.log(`Turma ${classItem.name} tem ${count} alunos`);
-
-          // Simular array de enrollments para manter compatibilidade
           const mockEnrollments = Array.from({ length: count || 0 }, (_, i) => ({ id: i }));
-          
           return { ...classItem, enrollments: mockEnrollments };
         })
       );
 
-      console.log('Classes with student count:', classesWithStudentCount);
       setClasses(classesWithStudentCount);
     } catch (error) {
       console.error('Erro ao buscar turmas:', error);
       Alert.alert('Erro', 'Não foi possível carregar suas turmas');
-      setClasses([]); // Set empty array on error
+      setClasses([]);
+    }
+  };
+
+  // NOVA: Buscar avisos recentes (usando tabela 'notices' como no ParentDashboard)
+  const fetchRecentAnnouncements = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('notices')
+        .select('*')
+        .eq('author_id', user.id)
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      if (error) throw error;
+      setRecentAnnouncements(data || []);
+    } catch (error) {
+      console.error('Erro ao buscar avisos:', error);
+      setRecentAnnouncements([]);
+    }
+  };
+
+  // NOVA: Buscar resumo da cantina (usando mesma estrutura do ParentDashboard)
+  const fetchCanteenSummary = async () => {
+    try {
+      // Buscar todas as transações do mês atual
+      const startOfMonth = new Date();
+      startOfMonth.setDate(1);
+      startOfMonth.setHours(0, 0, 0, 0);
+
+      // Buscar faturas pendentes (mesma lógica do ParentDashboard)
+      const { data: bills, error: billsError } = await supabase
+        .from('canteen_bills')
+        .select('total_amount')
+        .gte('created_at', startOfMonth.toISOString())
+        .neq('status', 'paid');
+
+      if (billsError) throw billsError;
+
+      // Buscar consumos para estatísticas
+      const { data: consumptions, error: consumptionsError } = await supabase
+        .from('canteen_consumption')
+        .select('total_price, consumed_at')
+        .gte('consumed_at', startOfMonth.toISOString());
+
+      if (consumptionsError) throw consumptionsError;
+
+      // Buscar transações de hoje
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+
+      const { data: todayConsumptions, error: todayError } = await supabase
+        .from('canteen_consumption')
+        .select('id')
+        .gte('consumed_at', today.toISOString())
+        .lt('consumed_at', tomorrow.toISOString());
+
+      if (todayError) throw todayError;
+
+      const totalSales = consumptions?.reduce((sum, c) => sum + (c.total_price || 0), 0) || 0;
+      const pendingPayments = bills?.reduce((sum, bill) => sum + (bill.total_amount || 0), 0) || 0;
+
+      setCanteenSummary({
+        totalSales,
+        pendingPayments,
+        todayTransactions: todayConsumptions?.length || 0
+      });
+    } catch (error) {
+      console.error('Erro ao buscar resumo da cantina:', error);
+      setCanteenSummary({ totalSales: 0, pendingPayments: 0, todayTransactions: 0 });
+    }
+  };
+
+  // NOVA: Buscar estatísticas rápidas
+  const fetchQuickStats = async () => {
+    try {
+      // Total de estudantes em todas as turmas do professor
+      const classIds = classes.map(c => c.id);
+      
+      if (classIds.length === 0) {
+        setQuickStats({ totalStudents: 0, presentToday: 0, pendingPickups: 0 });
+        return;
+      }
+
+      const { count: totalStudents } = await supabase
+        .from('enrollments')
+        .select('*', { count: 'exact', head: true })
+        .in('class_id', classIds);
+
+      // Presenças de hoje
+      const today = new Date().toISOString().split('T')[0];
+      const { count: presentToday } = await supabase
+        .from('attendances')
+        .select('*', { count: 'exact', head: true })
+        .in('class_id', classIds)
+        .eq('date', today)
+        .eq('status', 'present');
+
+      setQuickStats({
+        totalStudents: totalStudents || 0,
+        presentToday: presentToday || 0,
+        pendingPickups: unreadCount
+      });
+    } catch (error) {
+      console.error('Erro ao buscar estatísticas:', error);
+      setQuickStats({ totalStudents: 0, presentToday: 0, pendingPickups: 0 });
     }
   };
 
@@ -123,12 +234,6 @@ export default function TeacherDashboard({ navigation }) {
     }
 
     try {
-      console.log('Criando turma:', {
-        name: newClassName.trim(),
-        teacher_id: user.id,
-        school_year: schoolYear
-      });
-
       const { data, error } = await supabase
         .from('classes')
         .insert([{
@@ -139,15 +244,9 @@ export default function TeacherDashboard({ navigation }) {
         }])
         .select();
 
-      if (error) {
-        console.error('Erro ao criar turma:', error);
-        throw error;
-      }
-
-      console.log('Turma criada:', data);
+      if (error) throw error;
 
       if (data && data.length > 0) {
-        // Adicionar à lista local com enrollments vazio
         const newClass = { ...data[0], enrollments: [] };
         setClasses([newClass, ...classes]);
         setNewClassName('');
@@ -163,7 +262,6 @@ export default function TeacherDashboard({ navigation }) {
   const handleDeleteClass = async (classToDelete) => {
     const studentCount = classToDelete.enrollments?.length || 0;
     
-    // Primeira confirmação
     Alert.alert(
       'Excluir Turma',
       `Tem certeza que deseja excluir a turma "${classToDelete.name}"?` +
@@ -173,21 +271,7 @@ export default function TeacherDashboard({ navigation }) {
         {
           text: 'Continuar',
           style: 'destructive',
-          onPress: () => {
-            // Segunda confirmação com o nome da turma
-            Alert.alert(
-              'CONFIRMAÇÃO FINAL',
-              `Digite o nome da turma para confirmar a exclusão:\n\n"${classToDelete.name}"\n\nEsta ação não pode ser desfeita!`,
-              [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                  text: 'EXCLUIR',
-                  style: 'destructive',
-                  onPress: () => confirmDeleteClass(classToDelete)
-                }
-              ]
-            );
-          }
+          onPress: () => confirmDeleteClass(classToDelete)
         }
       ]
     );
@@ -195,99 +279,52 @@ export default function TeacherDashboard({ navigation }) {
 
   const confirmDeleteClass = async (classToDelete) => {
     try {
-      console.log('Excluindo turma:', classToDelete.id);
-
-      // Versão mais robusta - fazer uma query para cada tabela separadamente
-      
-      // 1. Primeiro, excluir registros de presença (attendances)
-      console.log('Excluindo presenças...');
-      const { error: attendancesError } = await supabase
+      // Excluir presenças
+      await supabase
         .from('attendances')
         .delete()
         .eq('class_id', classToDelete.id);
 
-      if (attendancesError) {
-        console.error('Erro ao excluir presenças:', attendancesError);
-        throw new Error(`Erro ao excluir presenças: ${attendancesError.message}`);
-      }
-
-      // 2. Buscar IDs dos estudantes da turma para excluir notificações
-      console.log('Buscando estudantes da turma...');
-      const { data: enrollments, error: enrollmentsSelectError } = await supabase
+      // Buscar estudantes para excluir notificações
+      const { data: enrollments } = await supabase
         .from('enrollments')
         .select('student_id')
         .eq('class_id', classToDelete.id);
 
-      if (enrollmentsSelectError) {
-        console.error('Erro ao buscar matrículas:', enrollmentsSelectError);
-        // Continuar mesmo se não encontrar matrículas
-      }
-
-      // 3. Excluir notificações dos estudantes desta turma
       if (enrollments && enrollments.length > 0) {
-        console.log('Excluindo notificações...');
         const studentIds = enrollments.map(e => e.student_id);
-        
-        const { error: notificationsError } = await supabase
+        await supabase
           .from('pickup_notifications')
           .delete()
           .in('student_id', studentIds);
-
-        if (notificationsError) {
-          console.log('Aviso ao excluir notificações:', notificationsError);
-          // Continuar mesmo se não conseguir excluir notificações
-        }
       }
 
-      // 4. Excluir matrículas (enrollments)
-      console.log('Excluindo matrículas...');
-      const { error: enrollmentsError } = await supabase
+      // Excluir matrículas
+      await supabase
         .from('enrollments')
         .delete()
         .eq('class_id', classToDelete.id);
 
-      if (enrollmentsError) {
-        console.error('Erro ao excluir matrículas:', enrollmentsError);
-        throw new Error(`Erro ao excluir matrículas: ${enrollmentsError.message}`);
-      }
-
-      // 5. Finalmente, excluir a turma
-      console.log('Excluindo turma...');
-      const { error: classError } = await supabase
+      // Excluir turma
+      const { error } = await supabase
         .from('classes')
         .delete()
         .eq('id', classToDelete.id)
         .eq('teacher_id', user.id);
 
-      if (classError) {
-        console.error('Erro ao excluir turma:', classError);
-        throw new Error(`Erro ao excluir turma: ${classError.message}`);
-      }
+      if (error) throw error;
 
-      console.log('Turma excluída com sucesso!');
-
-      // Remover da lista local
       setClasses(classes.filter(c => c.id !== classToDelete.id));
-      
-      Alert.alert(
-        'Turma Excluída ✅',
-        `A turma "${classToDelete.name}" foi excluída com sucesso!\n\nTodos os dados relacionados foram removidos.`
-      );
-
+      Alert.alert('Sucesso', `A turma "${classToDelete.name}" foi excluída com sucesso!`);
     } catch (error) {
-      console.error('Erro completo ao excluir turma:', error);
-      Alert.alert(
-        'Erro ao Excluir Turma ❌',
-        `Não foi possível excluir a turma "${classToDelete.name}".\n\nDetalhes técnicos:\n${error.message}\n\nTente novamente em alguns minutos.`
-      );
+      console.error('Erro ao excluir turma:', error);
+      Alert.alert('Erro', `Não foi possível excluir a turma: ${error.message}`);
     }
   };
 
-  // FUNÇÕES ATUALIZADAS: Usar hook de notificações
   const confirmPickup = async (notificationId) => {
     try {
       await respondToPickup(notificationId, true, 'Autorizado pelo professor');
-      // A atualização da lista será feita automaticamente pelo contexto
     } catch (error) {
       console.error('Erro ao confirmar busca:', error);
       Alert.alert('Erro', 'Não foi possível confirmar a busca. Tente novamente.');
@@ -297,7 +334,6 @@ export default function TeacherDashboard({ navigation }) {
   const rejectPickup = async (notificationId) => {
     try {
       await respondToPickup(notificationId, false, 'Negado pelo professor');
-      // A atualização da lista será feita automaticamente pelo contexto
     } catch (error) {
       console.error('Erro ao recusar busca:', error);
       Alert.alert('Erro', 'Não foi possível recusar a busca. Tente novamente.');
@@ -312,16 +348,45 @@ export default function TeacherDashboard({ navigation }) {
         { text: 'Cancelar', style: 'cancel' },
         { 
           text: 'Sair', 
-          onPress: async () => {
-            await signOut();
-          },
+          onPress: async () => await signOut(),
           style: 'destructive' 
         }
       ]
     );
   };
 
-  // FUNÇÃO RENDERCLASSCARD COMPLETA CORRIGIDA
+  // NOVAS: Funções para navegação (usando rotas do ParentDashboard)
+  const handleCreateAnnouncement = () => {
+    navigation.navigate('NoticeBoardScreen', { userRole: 'teacher' });
+  };
+
+  const handleCanteenManagement = () => {
+    navigation.navigate('CanteenManagementScreen', { userRole: 'teacher' });
+  };
+
+  const handleViewAllAnnouncements = () => {
+    navigation.navigate('NoticeBoardScreen', { userRole: 'teacher' });
+  };
+
+  // Utilitários
+  const formatCurrency = (value) => {
+    return new Intl.NumberFormat('pt-BR', {
+      style: 'currency',
+      currency: 'BRL'
+    }).format(value || 0);
+  };
+
+  const formatDate = (dateString) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  // Render functions
   const renderClassCard = (classItem) => {
     const studentCount = classItem.enrollments?.length || 0;
 
@@ -330,10 +395,6 @@ export default function TeacherDashboard({ navigation }) {
         key={classItem.id} 
         style={styles.classCard}
         onPress={() => {
-          console.log('Navegando para ClassDetails com:', {
-            classId: classItem.id,
-            className: classItem.name
-          });
           navigation.navigate('ClassDetails', {
             classId: classItem.id,
             className: classItem.name
@@ -363,8 +424,7 @@ export default function TeacherDashboard({ navigation }) {
           <TouchableOpacity
             style={styles.actionButton}
             onPress={(e) => {
-              e.stopPropagation(); // Evita navegação dupla
-              console.log('Chamada clicada para turma:', classItem.name);
+              e.stopPropagation();
               navigation.navigate('ClassDetails', {
                 classId: classItem.id,
                 className: classItem.name
@@ -372,7 +432,7 @@ export default function TeacherDashboard({ navigation }) {
             }}
           >
             <Ionicons name="list" size={20} color={theme.colors.primary} />
-            <Text style={styles.actionButtonText}>Ver Chamada</Text>
+            <Text style={styles.actionButtonText}>Chamada</Text>
           </TouchableOpacity>
 
           <TouchableOpacity 
@@ -383,7 +443,7 @@ export default function TeacherDashboard({ navigation }) {
             }}
           >
             <Ionicons name="chatbubbles" size={20} color={theme.colors.text.secondary} />
-            <Text style={styles.actionButtonText}>Mensagens</Text>
+            <Text style={styles.actionButtonText}>Chat</Text>
           </TouchableOpacity>
 
           <TouchableOpacity 
@@ -401,23 +461,13 @@ export default function TeacherDashboard({ navigation }) {
   };
 
   const renderNotificationCard = (notification) => {
-    const formatTime = (dateString) => {
-      const date = new Date(dateString);
-      return date.toLocaleString('pt-BR', {
-        day: '2-digit',
-        month: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    };
-
     return (
       <View key={notification.id} style={styles.notificationCard}>
         <View style={styles.notificationHeader}>
           <Ionicons name="car" size={20} color={theme.colors.warning} />
           <Text style={styles.notificationTitle}>Solicitação de Busca</Text>
           <Text style={styles.notificationTime}>
-            {formatTime(notification.created_at)}
+            {formatDate(notification.created_at)}
           </Text>
         </View>
 
@@ -455,25 +505,46 @@ export default function TeacherDashboard({ navigation }) {
     );
   };
 
-  const totalStudents = classes.reduce((total, c) => total + (c.enrollments?.length || 0), 0);
+  // NOVA: Render de avisos recentes (seguindo estrutura do ParentDashboard)
+  const renderAnnouncementCard = (notice) => {
+    return (
+      <View key={notice.id} style={styles.announcementCard}>
+        <View style={styles.announcementHeader}>
+          <Ionicons 
+            name={notice.type === 'urgent' ? 'alert-circle' : 'megaphone'} 
+            size={18} 
+            color={notice.type === 'urgent' ? theme.colors.error : theme.colors.primary} 
+          />
+          <Text style={styles.announcementTitle} numberOfLines={1}>
+            {notice.title}
+          </Text>
+          <Text style={styles.announcementDate}>
+            {formatDate(notice.created_at)}
+          </Text>
+        </View>
+        <Text style={styles.announcementContent} numberOfLines={2}>
+          {notice.content}
+        </Text>
+        {notice.class_id && (
+          <Text style={styles.announcementClass}>
+            Para turma específica
+          </Text>
+        )}
+      </View>
+    );
+  };
 
-  // DEBUG: Log dos dados para ajudar a identificar problemas
-  console.log('=== TEACHER DASHBOARD DEBUG ===');
-  console.log('User ID:', user?.id);
-  console.log('Profile:', profile);
-  console.log('Classes:', classes);
-  console.log('Loading:', loading);
+  const totalStudents = classes.reduce((total, c) => total + (c.enrollments?.length || 0), 0);
 
   return (
     <View style={styles.container}>
-      {/* Status Bar - Configuração para o gradiente funcionar */}
       <StatusBar 
         barStyle="light-content" 
         backgroundColor={theme.colors.primary}
         translucent={false}
       />
       
-      {/* Header com Safe Area customizada */}
+      {/* Header */}
       <View style={[styles.header, { 
         paddingTop: Math.max(insets.top, Platform.OS === 'ios' ? 44 : 24) + 12 
       }]}>
@@ -482,12 +553,10 @@ export default function TeacherDashboard({ navigation }) {
             <Text style={styles.greeting} numberOfLines={1} adjustsFontSizeToFit>
               Prof. {profile?.name}! 👩‍🏫
             </Text>
-            <Text style={styles.subGreeting}>Gerencie suas turmas</Text>
+            <Text style={styles.subGreeting}>Universo do Saber - Área do Professor</Text>
           </View>
           
-          {/* NOVO: Botões do header */}
           <View style={styles.headerActions}>
-            {/* Botão de notificações com badge */}
             <TouchableOpacity 
               style={styles.notificationButton} 
               onPress={() => navigation.navigate('Notifications')}
@@ -496,7 +565,6 @@ export default function TeacherDashboard({ navigation }) {
               <NotificationBadge />
             </TouchableOpacity>
             
-            {/* Botão de logout existente */}
             <TouchableOpacity style={styles.profileButton} onPress={handleLogout}>
               <Ionicons name="log-out-outline" size={24} color="white" />
             </TouchableOpacity>
@@ -504,7 +572,7 @@ export default function TeacherDashboard({ navigation }) {
         </View>
       </View>
 
-      {/* NOVO: Resumo de notificações pendentes */}
+      {/* Resumo de notificações pendentes */}
       {unreadCount > 0 && (
         <View style={styles.notificationSummary}>
           <Ionicons name="alert-circle" size={20} color="#f59e0b" />
@@ -520,7 +588,6 @@ export default function TeacherDashboard({ navigation }) {
         </View>
       )}
 
-      {/* Conteúdo */}
       <ScrollView
         style={styles.content}
         refreshControl={
@@ -528,7 +595,58 @@ export default function TeacherDashboard({ navigation }) {
         }
         showsVerticalScrollIndicator={false}
       >
-        {/* Resumo rápido */}
+        {/* NOVO: Ações Rápidas */}
+        <View style={styles.quickActionsContainer}>
+          <Text style={styles.sectionTitle}>Ações Rápidas</Text>
+          <View style={styles.quickActionsGrid}>
+            <TouchableOpacity 
+              style={styles.quickActionCard}
+              onPress={handleCreateAnnouncement}
+            >
+              <View style={[styles.quickActionIcon, { backgroundColor: '#e0f2fe' }]}>
+                <Ionicons name="megaphone" size={24} color="#0284c7" />
+              </View>
+              <Text style={styles.quickActionText}>Criar Aviso</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.quickActionCard}
+              onPress={handleCanteenManagement}
+            >
+              <View style={[styles.quickActionIcon, { backgroundColor: '#f0fdf4' }]}>
+                <Ionicons name="restaurant" size={24} color="#16a34a" />
+              </View>
+              <Text style={styles.quickActionText}>Cantina</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.quickActionCard}
+              onPress={() => navigation.navigate('Notifications')}
+            >
+              <View style={[styles.quickActionIcon, { backgroundColor: '#fef3c7' }]}>
+                <Ionicons name="notifications" size={24} color="#d97706" />
+              </View>
+              <Text style={styles.quickActionText}>Notificações</Text>
+              {unreadCount > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{unreadCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.quickActionCard}
+              onPress={() => setModalVisible(true)}
+            >
+              <View style={[styles.quickActionIcon, { backgroundColor: '#f3e8ff' }]}>
+                <Ionicons name="add-circle" size={24} color="#9333ea" />
+              </View>
+              <Text style={styles.quickActionText}>Nova Turma</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* NOVO: Resumo Dashboard */}
         <View style={styles.summaryContainer}>
           <View style={styles.summaryCard}>
             <Ionicons name="school" size={24} color={theme.colors.primary} />
@@ -543,9 +661,71 @@ export default function TeacherDashboard({ navigation }) {
           </View>
 
           <View style={styles.summaryCard}>
+            <Ionicons name="card" size={24} color="#16a34a" />
+            <Text style={[styles.summaryNumber, { fontSize: 14 }]}>
+              {formatCurrency(canteenSummary.totalSales)}
+            </Text>
+            <Text style={styles.summaryLabel}>Vendas</Text>
+          </View>
+
+          <View style={styles.summaryCard}>
             <Ionicons name="notifications" size={24} color={theme.colors.warning} />
             <Text style={styles.summaryNumber}>{unreadCount}</Text>
             <Text style={styles.summaryLabel}>Pendentes</Text>
+          </View>
+        </View>
+
+        {/* NOVO: Avisos Recentes */}
+        {recentAnnouncements.length > 0 && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Meus Avisos Recentes</Text>
+              <TouchableOpacity
+                style={styles.viewAllButton}
+                onPress={handleViewAllAnnouncements}
+              >
+                <Text style={styles.viewAllText}>Ver Todos</Text>
+              </TouchableOpacity>
+            </View>
+            {recentAnnouncements.map(renderAnnouncementCard)}
+          </View>
+        )}
+
+        {/* NOVO: Resumo da Cantina */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Resumo da Cantina</Text>
+            <TouchableOpacity
+              style={styles.viewAllButton}
+              onPress={handleCanteenManagement}
+            >
+              <Text style={styles.viewAllText}>Gerenciar</Text>
+            </TouchableOpacity>
+          </View>
+          
+          <View style={styles.canteenSummaryCard}>
+            <View style={styles.canteenStats}>
+              <View style={styles.canteenStat}>
+                <Text style={styles.canteenStatValue}>
+                  {formatCurrency(canteenSummary.totalSales)}
+                </Text>
+                <Text style={styles.canteenStatLabel}>Vendas do Mês</Text>
+              </View>
+              
+              <View style={styles.canteenStat}>
+                <Text style={[styles.canteenStatValue, { color: '#dc2626' }]}>
+                  {formatCurrency(canteenSummary.pendingPayments)}
+                </Text>
+                <Text style={styles.canteenStatLabel}>A Receber</Text>
+              </View>
+              
+              <View style={styles.canteenStat}>
+                <Text style={styles.canteenStatValue}>
+                  {canteenSummary.todayTransactions}
+                </Text>
+                <Text style={styles.canteenStatLabel}>Vendas Hoje</Text>
+              </View>
+            </View>
           </View>
         </View>
 
@@ -561,7 +741,6 @@ export default function TeacherDashboard({ navigation }) {
                 <Text style={styles.viewAllText}>Ver Todas</Text>
               </TouchableOpacity>
             </View>
-            {/* Mostrar apenas as 3 primeiras */}
             {notifications.slice(0, 3).map(renderNotificationCard)}
           </View>
         )}
@@ -601,7 +780,6 @@ export default function TeacherDashboard({ navigation }) {
           )}
         </View>
 
-        {/* Espaço extra no final para scroll confortável */}
         <View style={styles.bottomSpacing} />
       </ScrollView>
 
@@ -671,7 +849,6 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.primary,
     paddingBottom: theme.spacing.lg,
     paddingHorizontal: theme.spacing.lg,
-    // Sombra para destacar do conteúdo
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -691,7 +868,6 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 20,
     fontWeight: 'bold',
-    // Garantir que o texto seja legível
     textShadowColor: 'rgba(0, 0, 0, 0.3)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
@@ -705,7 +881,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 1,
   },
-  // NOVO: Estilos para os botões do header
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -719,7 +894,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     position: 'relative',
-    // Sombra para destaque
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -733,14 +907,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
-    // Pequena sombra para destaque
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
   },
-  // NOVO: Resumo de notificações
   notificationSummary: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -772,6 +944,62 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  // NOVO: Estilos para Ações Rápidas
+  quickActionsContainer: {
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.lg,
+  },
+  quickActionsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.md,
+    marginTop: theme.spacing.md,
+  },
+  quickActionCard: {
+    flex: 1,
+    minWidth: '45%',
+    maxWidth: '48%',
+    backgroundColor: 'white',
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+    position: 'relative',
+  },
+  quickActionIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: theme.spacing.sm,
+  },
+  quickActionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: theme.colors.text.primary,
+    textAlign: 'center',
+  },
+  badge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: '#ef4444',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  badgeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   summaryContainer: {
     flexDirection: 'row',
@@ -817,7 +1045,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: theme.colors.text.primary,
   },
-  // NOVO: Botão "Ver Todas"
   viewAllButton: {
     paddingHorizontal: theme.spacing.md,
     paddingVertical: 6,
@@ -843,6 +1070,77 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  // NOVO: Estilos para cards de avisos
+  announcementCard: {
+    backgroundColor: 'white',
+    borderRadius: theme.borderRadius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+    borderLeftWidth: 4,
+    borderLeftColor: theme.colors.primary,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  announcementHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.xs,
+    gap: theme.spacing.sm,
+  },
+  announcementTitle: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
+  },
+  announcementDate: {
+    fontSize: 12,
+    color: theme.colors.text.light,
+  },
+  announcementContent: {
+    fontSize: 13,
+    color: theme.colors.text.secondary,
+    lineHeight: 18,
+  },
+  announcementClass: {
+    fontSize: 12,
+    color: theme.colors.primary,
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  // NOVO: Estilos para resumo da cantina
+  canteenSummaryCard: {
+    backgroundColor: 'white',
+    borderRadius: theme.borderRadius.md,
+    padding: theme.spacing.md,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  canteenStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  canteenStat: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  canteenStatValue: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#16a34a',
+  },
+  canteenStatLabel: {
+    fontSize: 12,
+    color: theme.colors.text.secondary,
+    marginTop: 4,
+    textAlign: 'center',
   },
   classCard: {
     backgroundColor: 'white',
@@ -916,7 +1214,7 @@ const styles = StyleSheet.create({
     borderRadius: theme.borderRadius.sm,
   },
   deleteButton: {
-    backgroundColor: 'rgba(239, 68, 68, 0.1)', // Fundo vermelho claro
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
     width: 36,
     height: 36,
     borderRadius: 18,
@@ -926,10 +1224,6 @@ const styles = StyleSheet.create({
   actionButtonText: {
     color: theme.colors.text.secondary,
     fontSize: 14,
-  },
-  deleteButtonText: {
-    color: theme.colors.error,
-    fontWeight: '600',
   },
   notificationCard: {
     backgroundColor: 'white',
