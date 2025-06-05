@@ -5,17 +5,18 @@ import { createStackNavigator } from '@react-navigation/stack';
 import { useAuth } from '../contexts/AuthContext';
 import LoadingSpinner from '../components/LoadingSpinner';
 
-// Screens existentes
+// Screens
 import OnboardingScreen from '../screens/OnboardingScreen';
 import AuthScreen from '../screens/AuthScreen';
 import ParentDashboard from '../screens/ParentDashboard';
 import TeacherDashboard from '../screens/TeacherDashboard';
 import ClassDetailsScreen from '../screens/ClassDetailsScreen';
 import NotificationScreen from '../screens/NotificationScreen';
-
-// Novas screens
 import NoticeBoardScreen from '../screens/NoticeBoardScreen';
 import CanteenManagementScreen from '../screens/CanteenManagementScreen';
+import ChatListScreen from '../screens/ChatListScreen';
+import ChatScreen from '../screens/ChatScreen';
+import StartChatScreen from '../screens/StartChatScreen';
 
 const Stack = createStackNavigator();
 
@@ -30,57 +31,41 @@ export default function AppNavigator() {
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!user ? (
-          // Stack de autenticação
           <>
             <Stack.Screen name="Onboarding" component={OnboardingScreen} />
             <Stack.Screen name="Auth" component={AuthScreen} />
           </>
         ) : (
-          // Stack principal baseado no role do usuário
           <>
             {profile?.role === 'parent' && (
               <>
                 <Stack.Screen name="ParentDashboard" component={ParentDashboard} />
-                <Stack.Screen 
-                  name="Notifications" 
-                  component={NotificationScreen}
-                  options={{ headerShown: false }}
-                />
-                {/* Novas telas para pais */}
-                <Stack.Screen 
-                  name="NoticeBoardScreen" 
-                  component={NoticeBoardScreen}
-                  options={{ headerShown: false }}
-                />
-                <Stack.Screen 
-                  name="CanteenManagementScreen" 
-                  component={CanteenManagementScreen}
-                  options={{ headerShown: false }}
-                />
+                <Stack.Screen name="Notifications" component={NotificationScreen} />
+                <Stack.Screen name="NoticeBoardScreen" component={NoticeBoardScreen} />
+                <Stack.Screen name="CanteenManagementScreen" component={CanteenManagementScreen} />
+                
+                {/* ✅ Nomes corrigidos e padronizados */}
+                <Stack.Screen name="ChatListScreen" component={ChatListScreen} />
+                <Stack.Screen name="ChatScreen" component={ChatScreen} />
+                <Stack.Screen name="StartChatScreen" component={StartChatScreen} />
               </>
             )}
+            
             {profile?.role === 'teacher' && (
               <>
                 <Stack.Screen name="TeacherDashboard" component={TeacherDashboard} />
                 <Stack.Screen name="ClassDetails" component={ClassDetailsScreen} />
-                <Stack.Screen 
-                  name="Notifications" 
-                  component={NotificationScreen}
-                  options={{ headerShown: false }}
-                />
-                {/* Novas telas para professores */}
-                <Stack.Screen 
-                  name="NoticeBoardScreen" 
-                  component={NoticeBoardScreen}
-                  options={{ headerShown: false }}
-                />
-                <Stack.Screen 
-                  name="CanteenManagementScreen" 
-                  component={CanteenManagementScreen}
-                  options={{ headerShown: false }}
-                />
+                <Stack.Screen name="Notifications" component={NotificationScreen} />
+                <Stack.Screen name="NoticeBoardScreen" component={NoticeBoardScreen} />
+                <Stack.Screen name="CanteenManagementScreen" component={CanteenManagementScreen} />
+                
+                {/* ✅ Nomes padronizados */}
+                <Stack.Screen name="ChatListScreen" component={ChatListScreen} />
+                <Stack.Screen name="ChatScreen" component={ChatScreen} />
+                <Stack.Screen name="StartChatScreen" component={StartChatScreen} />
               </>
             )}
+            
             {!profile?.role && (
               <Stack.Screen name="Auth" component={AuthScreen} />
             )}

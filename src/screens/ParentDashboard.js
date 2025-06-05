@@ -40,17 +40,195 @@ export default function ParentDashboard({ navigation }) {
   });
   const [pixKey, setPixKey] = useState('');
 
+  // NOVOS ESTADOS PARA CHAT
+  const [unreadChats, setUnreadChats] = useState(0);
+  const [recentMessages, setRecentMessages] = useState([]);
+  const [availableTeachers, setAvailableTeachers] = useState([]);
+
   useEffect(() => {
-    fetchStudents();
-    fetchRecentNotices();
-    fetchCanteenSummary();
-    fetchPixKey();
+    fetchAllData();
   }, []);
+
+  useEffect(() => {
+    // Configurar realtime para mensagens - só uma vez
+    let subscription = null;
+    
+    const setupRealtimeSubscription = () => {
+      // Remover subscription anterior se existir
+      if (subscription) {
+        supabase.removeChannel(subscription);
+      }
+      
+      subscription = supabase
+        .channel(`parent-chat-updates-${user.id}`) // Canal único por usuário
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'messages',
+          },
+          (payload) => {
+            console.log('💬 Nova mensagem recebida:', payload);
+            fetchUnreadChats();
+            fetchRecentMessages();
+          }
+        )
+        .subscribe((status) => {
+          console.log('📡 Chat subscription status:', status);
+        });
+    };
+
+    if (user?.id) {
+      setupRealtimeSubscription();
+    }
+
+    // Cleanup na desmontagem do componente
+    return () => {
+      if (subscription) {
+        console.log('🧹 Limpando subscription do chat...');
+        supabase.removeChannel(subscription);
+      }
+    };
+  }, [user?.id]); // Dependência do user.id para evitar re-subscriptions desnecessárias
+
+  useEffect(() => {
+    // Atualizar dados quando students mudar
+    if (students.length > 0) {
+      fetchRecentNotices();
+      fetchCanteenSummary();
+      fetchAvailableTeachers();
+    }
+  }, [students]);
+
+  // NOVA FUNÇÃO: Buscar todos os dados
+  const fetchAllData = async () => {
+    try {
+      setLoading(true);
+      await fetchStudents(); // Primeiro buscar students
+      await Promise.all([
+        fetchPixKey(),
+        fetchUnreadChats(),
+        fetchRecentMessages()
+      ]);
+    } catch (error) {
+      console.error('Erro ao carregar dados:', error);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  // NOVA FUNÇÃO: Buscar chats não lidos
+  const fetchUnreadChats = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select(`
+          id,
+          conversation_id,
+          read,
+          conversations!inner (
+            parent_id
+          )
+        `)
+        .eq('conversations.parent_id', user.id)
+        .eq('read', false)
+        .neq('sender_id', user.id); // Não contar mensagens próprias
+
+      if (error) throw error;
+
+      setUnreadChats(data?.length || 0);
+    } catch (error) {
+      console.error('Erro ao buscar chats não lidos:', error);
+      setUnreadChats(0);
+    }
+  };
+
+  // NOVA FUNÇÃO: Buscar mensagens recentes
+  const fetchRecentMessages = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('conversations')
+        .select(`
+          id,
+          last_message_at,
+          teacher_id,
+          student_id,
+          profiles!conversations_teacher_id_fkey (
+            name
+          ),
+          students (
+            name
+          ),
+          messages (
+            content,
+            created_at,
+            sender_id
+          )
+        `)
+        .eq('parent_id', user.id)
+        .order('last_message_at', { ascending: false })
+        .limit(3);
+
+      if (error) throw error;
+
+      // Processar as mensagens para mostrar apenas a mais recente de cada conversa
+      const processedMessages = data?.map(conv => {
+        const lastMessage = conv.messages?.[0];
+        return {
+          id: conv.id,
+          teacherName: conv.profiles?.name || 'Professor',
+          studentName: conv.students?.name || 'Aluno',
+          lastMessage: lastMessage?.content || 'Sem mensagens',
+          lastMessageTime: conv.last_message_at,
+          isFromParent: lastMessage?.sender_id === user.id
+        };
+      }) || [];
+
+      setRecentMessages(processedMessages);
+    } catch (error) {
+      console.error('Erro ao buscar mensagens recentes:', error);
+      setRecentMessages([]);
+    }
+  };
+
+  // NOVA FUNÇÃO: Buscar professores disponíveis
+  const fetchAvailableTeachers = async () => {
+    try {
+      // Buscar professores dos filhos ativos
+      const activeStudents = students.filter(s => s.teacherId && s.classId);
+      if (activeStudents.length === 0) {
+        setAvailableTeachers([]);
+        return;
+      }
+
+      const teacherIds = [...new Set(activeStudents.map(s => s.teacherId))];
+      
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, name')
+        .in('id', teacherIds)
+        .eq('role', 'teacher');
+
+      if (error) throw error;
+
+      // Associar com os filhos
+      const teachersWithStudents = data?.map(teacher => ({
+        ...teacher,
+        students: activeStudents.filter(s => s.teacherId === teacher.id)
+      })) || [];
+
+      setAvailableTeachers(teachersWithStudents);
+    } catch (error) {
+      console.error('Erro ao buscar professores:', error);
+      setAvailableTeachers([]);
+    }
+  };
 
   // Função original do fetchStudents mantida
   const fetchStudents = async () => {
     try {
-      setLoading(true);
       console.log('=== BUSCANDO FILHOS DO RESPONSÁVEL ===');
       console.log('Parent ID:', user.id);
       
@@ -182,9 +360,6 @@ export default function ParentDashboard({ navigation }) {
       console.error('❌ Erro geral ao buscar estudantes:', error);
       Alert.alert('Erro', `Não foi possível carregar os dados dos filhos: ${error.message}`);
       setStudents([]);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
     }
   };
 
@@ -193,7 +368,10 @@ export default function ParentDashboard({ navigation }) {
     try {
       const classIds = students.map(s => s.classId).filter(Boolean);
       
-      if (classIds.length === 0) return;
+      if (classIds.length === 0) {
+        setRecentNotices([]);
+        return;
+      }
 
       const { data, error } = await supabase
         .from('notices')
@@ -211,6 +389,7 @@ export default function ParentDashboard({ navigation }) {
       setRecentNotices(data || []);
     } catch (error) {
       console.error('Erro ao buscar avisos:', error);
+      setRecentNotices([]);
     }
   };
 
@@ -219,7 +398,14 @@ export default function ParentDashboard({ navigation }) {
     try {
       const studentIds = students.map(s => s.id).filter(Boolean);
       
-      if (studentIds.length === 0) return;
+      if (studentIds.length === 0) {
+        setCanteenSummary({
+          totalDebt: 0,
+          pendingItems: 0,
+          recentConsumptions: []
+        });
+        return;
+      }
 
       // Buscar faturas pendentes
       const { data: bills, error: billsError } = await supabase
@@ -255,6 +441,11 @@ export default function ParentDashboard({ navigation }) {
 
     } catch (error) {
       console.error('Erro ao buscar resumo da cantina:', error);
+      setCanteenSummary({
+        totalDebt: 0,
+        pendingItems: 0,
+        recentConsumptions: []
+      });
     }
   };
 
@@ -286,10 +477,56 @@ export default function ParentDashboard({ navigation }) {
   // Função de refresh atualizada
   const onRefresh = () => {
     setRefreshing(true);
-    fetchStudents();
-    fetchRecentNotices();
-    fetchCanteenSummary();
-    fetchPixKey();
+    fetchAllData();
+  };
+
+  // NOVA FUNÇÃO: Navegar para o chat
+  const handleChatNavigation = () => {
+    navigation.navigate('ChatListScreen');
+  };
+
+  // NOVA FUNÇÃO: Iniciar chat com professor específico
+  const handleStartChatWithTeacher = (student) => {
+    if (!student.teacherId || !student.classId) {
+      Alert.alert(
+        'Aviso',
+        `${student.name} não possui professor vinculado. Entre em contato com a escola.`
+      );
+      return;
+    }
+
+    navigation.navigate('StartChatScreen', {
+      teacherId: student.teacherId,
+      studentId: student.id,
+      teacherName: student.teacherName,
+      studentName: student.name
+    });
+  };
+
+  // NOVA FUNÇÃO: Escolher professor para chat
+  const handleQuickChat = () => {
+    const activeStudents = students.filter(s => s.teacherId && s.classId);
+    
+    if (activeStudents.length === 0) {
+      Alert.alert('Aviso', 'Nenhum filho tem professor vinculado para chat.');
+      return;
+    }
+
+    if (activeStudents.length === 1) {
+      handleStartChatWithTeacher(activeStudents[0]);
+    } else {
+      Alert.alert(
+        'Escolher Professor',
+        'Para qual professor você gostaria de enviar mensagem?',
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          ...activeStudents.map(student => ({
+            text: `${student.teacherName} (${student.name})`,
+            onPress: () => handleStartChatWithTeacher(student)
+          }))
+        ]
+      );
+    }
   };
 
   // Funções originais mantidas
@@ -457,6 +694,44 @@ export default function ParentDashboard({ navigation }) {
       case 'announcement': return theme.colors.warning;
       default: return theme.colors.info;
     }
+  };
+
+  // NOVO: Renderizar mensagens recentes
+  const renderRecentMessages = () => {
+    if (recentMessages.length === 0) return null;
+
+    return (
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Mensagens Recentes</Text>
+          <TouchableOpacity onPress={handleChatNavigation}>
+            <Text style={styles.seeAllText}>Ver todas</Text>
+          </TouchableOpacity>
+        </View>
+        
+        {recentMessages.slice(0, 2).map((message) => (
+          <TouchableOpacity 
+            key={message.id} 
+            style={styles.messageCard}
+            onPress={() => navigation.navigate('ChatScreen', { conversationId: message.id })}
+          >
+            <View style={styles.messageHeader}>
+              <Ionicons name="chatbubble-ellipses" size={18} color={theme.colors.primary} />
+              <View style={styles.messageInfo}>
+                <Text style={styles.messageTeacher}>{message.teacherName}</Text>
+                <Text style={styles.messageStudent}>Sobre: {message.studentName}</Text>
+              </View>
+              <Text style={styles.messageTime}>
+                {formatDate(message.lastMessageTime)}
+              </Text>
+            </View>
+            <Text style={styles.messageContent} numberOfLines={2}>
+              {message.isFromParent ? 'Você: ' : ''}{message.lastMessage}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    );
   };
 
   // NOVO: Renderizar avisos recentes
@@ -676,17 +951,15 @@ export default function ParentDashboard({ navigation }) {
             </Text>
           </TouchableOpacity>
 
+          {/* BOTÃO DE CHAT ATUALIZADO */}
           <TouchableOpacity 
             style={[
               styles.actionButton, 
-              hasActiveEnrollment ? styles.secondaryAction : 
-              canDelete ? styles.deleteAction : styles.disabledAction
+              hasActiveEnrollment ? styles.chatAction : styles.disabledAction
             ]}
             onPress={() => {
               if (hasActiveEnrollment) {
-                Alert.alert('Em breve', 'Histórico de presença será implementado em breve!');
-              } else if (canDelete) {
-                deleteStudent(student);
+                handleStartChatWithTeacher(student);
               } else {
                 Alert.alert(
                   'Aluno Sem Turma', 
@@ -694,25 +967,16 @@ export default function ParentDashboard({ navigation }) {
                 );
               }
             }}
-            disabled={deletingStudent === student.id}
           >
-            {deletingStudent === student.id ? (
-              <ActivityIndicator size="small" color={theme.colors.error} />
-            ) : (
-              <Ionicons 
-                name={hasActiveEnrollment ? "calendar" : 
-                      canDelete ? "trash" : "information-circle-outline"} 
-                size={18} 
-                color={hasActiveEnrollment ? theme.colors.text.secondary : 
-                       canDelete ? "white" : theme.colors.text.light} 
-              />
-            )}
+            <Ionicons 
+              name={hasActiveEnrollment ? "chatbubbles" : "chatbubbles-outline"} 
+              size={18} 
+              color={hasActiveEnrollment ? "white" : theme.colors.text.light} 
+            />
             <Text style={[
-              hasActiveEnrollment ? styles.secondaryActionText : 
-              canDelete ? styles.deleteActionText : styles.disabledActionText
+              hasActiveEnrollment ? styles.chatActionText : styles.disabledActionText
             ]}>
-              {hasActiveEnrollment ? 'Ver Histórico' : 
-               canDelete ? 'Remover' : 'Info'}
+              {hasActiveEnrollment ? 'Chat Professor' : 'Sem Chat'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -740,6 +1004,19 @@ export default function ParentDashboard({ navigation }) {
           </View>
           
           <View style={styles.headerActions}>
+            {/* BOTÃO DE CHAT NO HEADER */}
+            <TouchableOpacity 
+              style={styles.chatButton} 
+              onPress={handleChatNavigation}
+            >
+              <Ionicons name="chatbubbles-outline" size={24} color="white" />
+              {unreadChats > 0 && (
+                <View style={styles.chatBadge}>
+                  <Text style={styles.chatBadgeText}>{unreadChats}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+
             <TouchableOpacity 
               style={styles.notificationButton} 
               onPress={() => navigation.navigate('Notifications')}
@@ -785,10 +1062,11 @@ export default function ParentDashboard({ navigation }) {
             <Text style={styles.summaryLabel}>Filhos</Text>
           </View>
 
+          {/* CARD DE CHAT NO RESUMO */}
           <View style={styles.summaryCard}>
-            <Ionicons name="newspaper" size={24} color={theme.colors.success} />
-            <Text style={styles.summaryNumber}>{recentNotices.length}</Text>
-            <Text style={styles.summaryLabel}>Avisos</Text>
+            <Ionicons name="chatbubbles" size={24} color="#3b82f6" />
+            <Text style={styles.summaryNumber}>{unreadChats}</Text>
+            <Text style={styles.summaryLabel}>Chats</Text>
           </View>
 
           <View style={styles.summaryCard}>
@@ -805,6 +1083,9 @@ export default function ParentDashboard({ navigation }) {
             <Text style={styles.summaryLabel}>A Pagar</Text>
           </View>
         </View>
+
+        {/* NOVA SEÇÃO: Mensagens recentes */}
+        {renderRecentMessages()}
 
         {/* NOVO: Avisos recentes */}
         {renderRecentNotices()}
@@ -877,6 +1158,22 @@ export default function ParentDashboard({ navigation }) {
                 <Text style={styles.quickActionText}>Notificar Busca</Text>
               </TouchableOpacity>
 
+              {/* AÇÃO RÁPIDA DE CHAT ATUALIZADA */}
+              <TouchableOpacity 
+                style={styles.quickActionCard}
+                onPress={handleQuickChat}
+              >
+                <View style={styles.quickActionIconContainer}>
+                  <Ionicons name="chatbubbles" size={32} color="#3b82f6" />
+                  {unreadChats > 0 && (
+                    <View style={styles.quickActionBadge}>
+                      <Text style={styles.quickActionBadgeText}>{unreadChats}</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.quickActionText}>Chat Professor</Text>
+              </TouchableOpacity>
+
               {/* NOVO: Botão para mural de avisos */}
               <TouchableOpacity 
                 style={styles.quickActionCard}
@@ -896,17 +1193,6 @@ export default function ParentDashboard({ navigation }) {
               >
                 <Ionicons name="restaurant" size={32} color={theme.colors.warning} />
                 <Text style={styles.quickActionText}>Cantina</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.quickActionCard}
-                onPress={() => navigation.navigate('Notifications')}
-              >
-                <View style={styles.quickActionIconContainer}>
-                  <Ionicons name="notifications" size={32} color={theme.colors.secondary} />
-                  {unreadCount > 0 && <NotificationBadge size="small" />}
-                </View>
-                <Text style={styles.quickActionText}>Notificações</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -963,6 +1249,39 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+  },
+  // NOVOS ESTILOS PARA O BOTÃO DE CHAT
+  chatButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  chatBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    backgroundColor: '#ef4444',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'white',
+  },
+  chatBadgeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   notificationButton: {
     width: 44,
@@ -1035,7 +1354,11 @@ const styles = StyleSheet.create({
     padding: theme.spacing.sm,
     borderRadius: theme.borderRadius.md,
     alignItems: 'center',
-    ...theme.shadows.small,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   summaryNumber: {
     fontSize: 18,
@@ -1070,13 +1393,59 @@ const styles = StyleSheet.create({
     color: theme.colors.primary,
     fontWeight: '500',
   },
+  // NOVOS ESTILOS PARA MENSAGENS RECENTES
+  messageCard: {
+    backgroundColor: 'white',
+    borderRadius: theme.borderRadius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  messageHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: theme.spacing.xs,
+    gap: theme.spacing.sm,
+  },
+  messageInfo: {
+    flex: 1,
+  },
+  messageTeacher: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
+  },
+  messageStudent: {
+    fontSize: 12,
+    color: theme.colors.text.secondary,
+    marginTop: 2,
+  },
+  messageTime: {
+    fontSize: 12,
+    color: theme.colors.text.light,
+  },
+  messageContent: {
+    fontSize: 13,
+    color: theme.colors.text.secondary,
+    lineHeight: 18,
+  },
   // NOVOS: Estilos para avisos
   noticeCard: {
     backgroundColor: 'white',
     borderRadius: theme.borderRadius.lg,
     padding: theme.spacing.md,
     marginBottom: theme.spacing.sm,
-    ...theme.shadows.small,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   noticeHeader: {
     flexDirection: 'row',
@@ -1161,7 +1530,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'white',
     borderRadius: theme.borderRadius.lg,
     padding: theme.spacing.md,
-    ...theme.shadows.small,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   consumptionsTitle: {
     fontSize: 14,
@@ -1201,7 +1574,11 @@ const styles = StyleSheet.create({
     borderRadius: theme.borderRadius.md,
     padding: theme.spacing.md,
     marginBottom: theme.spacing.md,
-    ...theme.shadows.small,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   childCardInactive: {
     backgroundColor: '#f8f9fa',
@@ -1312,6 +1689,15 @@ const styles = StyleSheet.create({
   primaryAction: {
     backgroundColor: theme.colors.primary,
   },
+  // NOVO ESTILO PARA AÇÃO DE CHAT
+  chatAction: {
+    backgroundColor: '#3b82f6',
+  },
+  chatActionText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+  },
   secondaryAction: {
     backgroundColor: theme.colors.background,
     borderWidth: 1,
@@ -1355,10 +1741,31 @@ const styles = StyleSheet.create({
     padding: theme.spacing.md,
     borderRadius: theme.borderRadius.md,
     alignItems: 'center',
-    ...theme.shadows.small,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   quickActionIconContainer: {
     position: 'relative',
+  },
+  // NOVO BADGE PARA AÇÃO RÁPIDA
+  quickActionBadge: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    backgroundColor: '#ef4444',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  quickActionBadgeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
   quickActionText: {
     fontSize: 12,

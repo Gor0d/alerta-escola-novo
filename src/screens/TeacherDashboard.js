@@ -34,6 +34,10 @@ export default function TeacherDashboard({ navigation }) {
   const [newClassName, setNewClassName] = useState('');
   const [schoolYear, setSchoolYear] = useState('2025');
 
+  // Novos estados para chat
+  const [unreadChats, setUnreadChats] = useState(0);
+  const [recentMessages, setRecentMessages] = useState([]);
+
   const [recentAnnouncements, setRecentAnnouncements] = useState([]);
   const [canteenSummary, setCanteenSummary] = useState({
     totalSales: 0,
@@ -51,11 +55,128 @@ export default function TeacherDashboard({ navigation }) {
   }, []);
 
   useEffect(() => {
+    // Configurar realtime para mensagens - só uma vez
+    let subscription = null;
+    
+    const setupRealtimeSubscription = () => {
+      // Remover subscription anterior se existir
+      if (subscription) {
+        supabase.removeChannel(subscription);
+      }
+      
+      subscription = supabase
+        .channel(`teacher-chat-updates-${user.id}`) // Canal único por usuário
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'messages',
+          },
+          (payload) => {
+            console.log('💬 Nova mensagem recebida:', payload);
+            fetchUnreadChats();
+            fetchRecentMessages();
+          }
+        )
+        .subscribe((status) => {
+          console.log('📡 Chat subscription status:', status);
+        });
+    };
+
+    if (user?.id) {
+      setupRealtimeSubscription();
+    }
+
+    // Cleanup na desmontagem do componente
+    return () => {
+      if (subscription) {
+        console.log('🧹 Limpando subscription do chat...');
+        supabase.removeChannel(subscription);
+      }
+    };
+  }, [user?.id]); // Dependência do user.id para evitar re-subscriptions desnecessárias
+
+  useEffect(() => {
     if (contextNotifications) {
       const pendingNotifications = contextNotifications.filter(n => n.status === 'pending');
       setNotifications(pendingNotifications);
     }
   }, [contextNotifications]);
+
+  // Nova função para buscar chats não lidos
+  const fetchUnreadChats = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select(`
+          id,
+          conversation_id,
+          read,
+          conversations!inner (
+            teacher_id
+          )
+        `)
+        .eq('conversations.teacher_id', user.id)
+        .eq('read', false)
+        .neq('sender_id', user.id); // Não contar mensagens próprias
+
+      if (error) throw error;
+
+      setUnreadChats(data?.length || 0);
+    } catch (error) {
+      console.error('Erro ao buscar chats não lidos:', error);
+      setUnreadChats(0);
+    }
+  };
+
+  // Nova função para buscar mensagens recentes
+  const fetchRecentMessages = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('conversations')
+        .select(`
+          id,
+          last_message_at,
+          parent_id,
+          student_id,
+          profiles!conversations_parent_id_fkey (
+            name
+          ),
+          students (
+            name
+          ),
+          messages (
+            content,
+            created_at,
+            sender_id
+          )
+        `)
+        .eq('teacher_id', user.id)
+        .order('last_message_at', { ascending: false })
+        .limit(3);
+
+      if (error) throw error;
+
+      // Processar as mensagens para mostrar apenas a mais recente de cada conversa
+      const processedMessages = data?.map(conv => {
+        const lastMessage = conv.messages?.[0];
+        return {
+          id: conv.id,
+          parentName: conv.profiles?.name || 'Responsável',
+          studentName: conv.students?.name || 'Aluno',
+          lastMessage: lastMessage?.content || 'Sem mensagens',
+          lastMessageTime: conv.last_message_at,
+          isFromTeacher: lastMessage?.sender_id === user.id
+        };
+      }) || [];
+
+      setRecentMessages(processedMessages);
+    } catch (error) {
+      console.error('Erro ao buscar mensagens recentes:', error);
+      setRecentMessages([]);
+    }
+  };
 
   const fetchData = async () => {
     try {
@@ -64,7 +185,9 @@ export default function TeacherDashboard({ navigation }) {
         fetchClasses(),
         fetchRecentAnnouncements(),
         fetchCanteenSummary(),
-        fetchQuickStats()
+        fetchQuickStats(),
+        fetchUnreadChats(),
+        fetchRecentMessages()
       ]);
     } catch (error) {
       console.error('Erro ao carregar dados:', error);
@@ -344,6 +467,19 @@ export default function TeacherDashboard({ navigation }) {
     navigation.navigate('NoticeBoardScreen', { userRole: 'teacher' });
   };
 
+  // Nova função para navegar para o chat
+  const handleChatNavigation = () => {
+    navigation.navigate('ChatListScreen');
+  };
+
+  // Nova função para iniciar chat com responsável específico
+  const handleStartChatWithParent = (classItem) => {
+    navigation.navigate('StartChatScreen', { 
+      classId: classItem.id, 
+      className: classItem.name 
+    });
+  };
+
   const formatCurrency = (value) => {
     return new Intl.NumberFormat('pt-BR', {
       style: 'currency',
@@ -409,14 +545,15 @@ export default function TeacherDashboard({ navigation }) {
             <Text style={styles.actionButtonText}>Chamada</Text>
           </TouchableOpacity>
 
+          {/* BOTÃO DE CHAT ATUALIZADO */}
           <TouchableOpacity 
             style={styles.actionButton}
             onPress={(e) => {
               e.stopPropagation();
-              Alert.alert('Em breve', 'Funcionalidade de mensagens será implementada!');
+              handleStartChatWithParent(classItem);
             }}
           >
-            <Ionicons name="chatbubbles" size={20} color={theme.colors.text.secondary} />
+            <Ionicons name="chatbubbles" size={20} color={theme.colors.success} />
             <Text style={styles.actionButtonText}>Chat</Text>
           </TouchableOpacity>
 
@@ -507,6 +644,30 @@ export default function TeacherDashboard({ navigation }) {
     );
   };
 
+  // Nova função para renderizar mensagens recentes
+  const renderRecentMessageCard = (message) => {
+    return (
+      <TouchableOpacity 
+        key={message.id} 
+        style={styles.messageCard}
+        onPress={() => navigation.navigate('ChatScreen', { conversationId: message.id })}
+      >
+        <View style={styles.messageHeader}>
+          <Ionicons name="chatbubble-ellipses" size={18} color={theme.colors.primary} />
+          <Text style={styles.messageParent} numberOfLines={1}>
+            {message.parentName} • {message.studentName}
+          </Text>
+          <Text style={styles.messageTime}>
+            {formatDate(message.lastMessageTime)}
+          </Text>
+        </View>
+        <Text style={styles.messageContent} numberOfLines={2}>
+          {message.isFromTeacher ? 'Você: ' : ''}{message.lastMessage}
+        </Text>
+      </TouchableOpacity>
+    );
+  };
+
   const totalStudents = classes.reduce((total, c) => total + (c.enrollments?.length || 0), 0);
 
   return (
@@ -529,6 +690,19 @@ export default function TeacherDashboard({ navigation }) {
           </View>
           
           <View style={styles.headerActions}>
+            {/* BOTÃO DE CHAT ATUALIZADO NO HEADER */}
+            <TouchableOpacity 
+              style={styles.chatButton} 
+              onPress={handleChatNavigation}
+            >
+              <Ionicons name="chatbubbles-outline" size={24} color="white" />
+              {unreadChats > 0 && (
+                <View style={styles.chatBadge}>
+                  <Text style={styles.chatBadgeText}>{unreadChats}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+
             <TouchableOpacity 
               style={styles.notificationButton} 
               onPress={() => navigation.navigate('Notifications')}
@@ -579,6 +753,22 @@ export default function TeacherDashboard({ navigation }) {
               <Text style={styles.quickActionText}>Criar Aviso</Text>
             </TouchableOpacity>
 
+            {/* AÇÃO RÁPIDA DE CHAT ATUALIZADA */}
+            <TouchableOpacity 
+              style={styles.quickActionCard}
+              onPress={handleChatNavigation}
+            >
+              <View style={[styles.quickActionIcon, { backgroundColor: '#f0f9ff' }]}>
+                <Ionicons name="chatbubbles" size={24} color={theme.colors.primary} />
+              </View>
+              <Text style={styles.quickActionText}>Mensagens</Text>
+              {unreadChats > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{unreadChats}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+
             <TouchableOpacity 
               style={styles.quickActionCard}
               onPress={handleCanteenManagement}
@@ -603,16 +793,6 @@ export default function TeacherDashboard({ navigation }) {
                 </View>
               )}
             </TouchableOpacity>
-
-            <TouchableOpacity 
-              style={styles.quickActionCard}
-              onPress={() => setModalVisible(true)}
-            >
-              <View style={[styles.quickActionIcon, { backgroundColor: '#f3e8ff' }]}>
-                <Ionicons name="add-circle" size={24} color="#9333ea" />
-              </View>
-              <Text style={styles.quickActionText}>Nova Turma</Text>
-            </TouchableOpacity>
           </View>
         </View>
 
@@ -629,12 +809,11 @@ export default function TeacherDashboard({ navigation }) {
             <Text style={styles.summaryLabel}>Alunos</Text>
           </View>
 
+          {/* CARD DE CHAT NO RESUMO */}
           <View style={styles.summaryCard}>
-            <Ionicons name="card" size={24} color="#16a34a" />
-            <Text style={[styles.summaryNumber, { fontSize: 14 }]}>
-              {formatCurrency(canteenSummary.totalSales)}
-            </Text>
-            <Text style={styles.summaryLabel}>Vendas</Text>
+            <Ionicons name="chatbubbles" size={24} color="#3b82f6" />
+            <Text style={styles.summaryNumber}>{unreadChats}</Text>
+            <Text style={styles.summaryLabel}>Chats</Text>
           </View>
 
           <View style={styles.summaryCard}>
@@ -643,6 +822,22 @@ export default function TeacherDashboard({ navigation }) {
             <Text style={styles.summaryLabel}>Pendentes</Text>
           </View>
         </View>
+
+        {/* NOVA SEÇÃO DE MENSAGENS RECENTES */}
+        {recentMessages.length > 0 && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Mensagens Recentes</Text>
+              <TouchableOpacity
+                style={styles.viewAllButton}
+                onPress={handleChatNavigation}
+              >
+                <Text style={styles.viewAllText}>Ver Todas</Text>
+              </TouchableOpacity>
+            </View>
+            {recentMessages.map(renderRecentMessageCard)}
+          </View>
+        )}
 
         {recentAnnouncements.length > 0 && (
           <View style={styles.section}>
@@ -850,6 +1045,39 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
+  // NOVOS ESTILOS PARA O BOTÃO DE CHAT
+  chatButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  chatBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    backgroundColor: '#ef4444',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'white',
+  },
+  chatBadgeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
   notificationButton: {
     width: 44,
     height: 44,
@@ -1033,6 +1261,41 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+  },
+  // NOVOS ESTILOS PARA MENSAGENS RECENTES
+  messageCard: {
+    backgroundColor: 'white',
+    borderRadius: theme.borderRadius.md,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3b82f6',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  messageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.xs,
+    gap: theme.spacing.sm,
+  },
+  messageParent: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: theme.colors.text.primary,
+  },
+  messageTime: {
+    fontSize: 12,
+    color: theme.colors.text.light,
+  },
+  messageContent: {
+    fontSize: 13,
+    color: theme.colors.text.secondary,
+    lineHeight: 18,
   },
   announcementCard: {
     backgroundColor: 'white',
