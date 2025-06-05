@@ -62,6 +62,11 @@ export default function CanteenManagementScreen({ route, navigation }) {
     try {
       setLoading(true);
       
+      // ✅ CORRIGIR PAGAMENTOS DIÁRIOS PRIMEIRO (APENAS PARA PAIS)
+      if (userRole === 'parent') {
+        await fixDailyPayments();
+      }
+      
       await Promise.all([
         fetchCanteenItems(),
         fetchStudents(),
@@ -107,12 +112,20 @@ export default function CanteenManagementScreen({ route, navigation }) {
         query = query.eq('enrollments.class_id', classId);
       } else if (userRole === 'parent') {
         const { data: { user } } = await supabase.auth.getUser();
-        query = query.eq('parent_id', user.id);
+        if (user) {
+          query = query.eq('parent_id', user.id);
+        }
       }
 
       const { data, error } = await query;
       if (error) throw error;
       setStudents(data || []);
+      
+      // ✅ BUSCAR FATURAS IMEDIATAMENTE APÓS CARREGAR ESTUDANTES PARA PAIS
+      if (userRole === 'parent' && data && data.length > 0) {
+        await fetchBillsForParent(data);
+      }
+      
     } catch (error) {
       console.error('Erro ao buscar alunos:', error);
     }
@@ -132,9 +145,21 @@ export default function CanteenManagementScreen({ route, navigation }) {
 
       if (userRole === 'parent') {
         const { data: { user } } = await supabase.auth.getUser();
-        const studentIds = students.filter(s => s.parent_id === user.id).map(s => s.id);
-        if (studentIds.length > 0) {
-          query = query.in('student_id', studentIds);
+        if (user) {
+          // ✅ MELHORAR BUSCA DE CONSUMOS PARA PAIS
+          const { data: parentStudents } = await supabase
+            .from('students')
+            .select('id')
+            .eq('parent_id', user.id);
+          
+          if (parentStudents && parentStudents.length > 0) {
+            const studentIds = parentStudents.map(s => s.id);
+            query = query.in('student_id', studentIds);
+          } else {
+            // Se não tem filhos, retornar array vazio
+            setConsumptions([]);
+            return;
+          }
         }
       }
 
@@ -159,9 +184,25 @@ export default function CanteenManagementScreen({ route, navigation }) {
 
       if (userRole === 'parent') {
         const { data: { user } } = await supabase.auth.getUser();
-        const studentIds = students.filter(s => s.parent_id === user.id).map(s => s.id);
-        if (studentIds.length > 0) {
-          query = query.in('student_id', studentIds);
+        if (user) {
+          // ✅ MELHORAR BUSCA DE FATURAS PARA PAIS
+          const { data: parentStudents } = await supabase
+            .from('students')
+            .select('id')
+            .eq('parent_id', user.id);
+          
+          if (parentStudents && parentStudents.length > 0) {
+            const studentIds = parentStudents.map(s => s.id);
+            
+            // ✅ CRIAR FATURAS FALTANTES ANTES DE BUSCAR
+            await createMissingBills(studentIds);
+            
+            query = query.in('student_id', studentIds);
+          } else {
+            // Se não tem filhos, retornar array vazio
+            setBills([]);
+            return;
+          }
         }
       }
 
@@ -170,6 +211,170 @@ export default function CanteenManagementScreen({ route, navigation }) {
       setBills(data || []);
     } catch (error) {
       console.error('Erro ao buscar faturas:', error);
+    }
+  };
+
+  // ✅ NOVA FUNÇÃO ESPECÍFICA PARA BUSCAR FATURAS DOS PAIS
+  const fetchBillsForParent = async (studentsList = null) => {
+    try {
+      const studentsToUse = studentsList || students;
+      
+      if (studentsToUse.length === 0) {
+        setBills([]);
+        return;
+      }
+
+      const studentIds = studentsToUse.map(s => s.id);
+      
+      // ✅ PRIMEIRO: Criar faturas para consumos pendentes
+      await createMissingBills(studentIds);
+      
+      const { data, error } = await supabase
+        .from('canteen_bills')
+        .select(`
+          *,
+          student:students(name, id)
+        `)
+        .in('student_id', studentIds)
+        .order('year', { ascending: false })
+        .order('month', { ascending: false });
+
+      if (error) throw error;
+      
+      console.log('📋 Faturas encontradas para os filhos:', data);
+      setBills(data || []);
+    } catch (error) {
+      console.error('Erro ao buscar faturas dos filhos:', error);
+    }
+  };
+
+  // ✅ FUNÇÃO PARA CRIAR FATURAS FALTANTES BASEADAS EM CONSUMOS PENDENTES
+  const createMissingBills = async (studentIds) => {
+    try {
+      console.log('🔍 Verificando consumos MENSAIS pendentes para criar faturas...');
+      
+      // ✅ BUSCAR APENAS CONSUMOS COM PAGAMENTO MENSAL E PENDENTES
+      const { data: pendingConsumptions, error: consumptionError } = await supabase
+        .from('canteen_consumption')
+        .select('student_id, total_price, consumed_at, payment_method, payment_status')
+        .in('student_id', studentIds)
+        .eq('payment_method', 'monthly')  // ✅ APENAS PAGAMENTOS MENSAIS
+        .eq('payment_status', 'pending'); // ✅ APENAS PENDENTES
+
+      if (consumptionError) throw consumptionError;
+      
+      if (!pendingConsumptions || pendingConsumptions.length === 0) {
+        console.log('📄 Nenhum consumo MENSAL pendente encontrado');
+        return;
+      }
+
+      console.log(`📊 ${pendingConsumptions.length} consumos MENSAIS pendentes encontrados`);
+      console.log('💰 Consumos encontrados:', pendingConsumptions.map(c => ({
+        student_id: c.student_id,
+        total_price: c.total_price,
+        payment_method: c.payment_method,
+        payment_status: c.payment_status,
+        consumed_at: new Date(c.consumed_at).toLocaleDateString('pt-BR')
+      })));
+
+      // Agrupar consumos por estudante e mês
+      const groupedConsumptions = {};
+      
+      pendingConsumptions.forEach(consumption => {
+        const date = new Date(consumption.consumed_at);
+        const month = date.getMonth() + 1;
+        const year = date.getFullYear();
+        const key = `${consumption.student_id}-${year}-${month}`;
+        
+        if (!groupedConsumptions[key]) {
+          groupedConsumptions[key] = {
+            student_id: consumption.student_id,
+            month: month,
+            year: year,
+            total_amount: 0,
+            consumptions_count: 0
+          };
+        }
+        
+        groupedConsumptions[key].total_amount += consumption.total_price;
+        groupedConsumptions[key].consumptions_count += 1;
+      });
+
+      console.log('📋 Grupos de faturas a processar:', Object.values(groupedConsumptions));
+
+      // Criar/atualizar faturas para cada grupo
+      for (const group of Object.values(groupedConsumptions)) {
+        await createOrUpdateBill(group);
+      }
+      
+      console.log(`✅ Processadas faturas para ${Object.keys(groupedConsumptions).length} grupos`);
+      
+    } catch (error) {
+      console.error('❌ Erro ao criar faturas faltantes:', error);
+    }
+  };
+
+  // ✅ FUNÇÃO PARA CRIAR OU ATUALIZAR UMA FATURA ESPECÍFICA
+  const createOrUpdateBill = async ({ student_id, month, year, total_amount, consumptions_count }) => {
+    try {
+      // Verificar se já existe uma fatura para este período
+      const { data: existingBill, error: searchError } = await supabase
+        .from('canteen_bills')
+        .select('*')
+        .eq('student_id', student_id)
+        .eq('month', month)
+        .eq('year', year)
+        .single();
+
+      if (searchError && searchError.code !== 'PGRST116') {
+        throw searchError;
+      }
+
+      const dueDate = new Date(year, month, 5); // Vencimento dia 5 do mês seguinte
+      const notes = `${consumptions_count} consumo(s) da cantina`;
+
+      if (existingBill) {
+        // ✅ ATUALIZAR FATURA EXISTENTE
+        console.log(`📝 Atualizando fatura existente: ${month}/${year} - Estudante ${student_id}`);
+        console.log(`💰 Valor anterior: R$ ${existingBill.total_amount} → Novo valor: R$ ${total_amount}`);
+        
+        const { error: updateError } = await supabase
+          .from('canteen_bills')
+          .update({
+            total_amount: total_amount,
+            status: total_amount > 0 ? 'open' : 'paid',
+            notes: notes,
+            due_date: dueDate.toISOString().split('T')[0]
+          })
+          .eq('id', existingBill.id);
+
+        if (updateError) throw updateError;
+        
+      } else {
+        // ✅ CRIAR NOVA FATURA
+        console.log(`📄 Criando nova fatura: ${month}/${year} - Estudante ${student_id}`);
+        console.log(`💰 Valor: R$ ${total_amount} (${consumptions_count} consumos)`);
+        
+        const { error: insertError } = await supabase
+          .from('canteen_bills')
+          .insert([{
+            student_id: student_id,
+            month: month,
+            year: year,
+            total_amount: total_amount,
+            status: total_amount > 0 ? 'open' : 'paid',
+            due_date: dueDate.toISOString().split('T')[0],
+            pix_key: pixKey,
+            notes: notes
+          }]);
+
+        if (insertError) throw insertError;
+        
+        console.log('✅ Nova fatura criada com sucesso!');
+      }
+      
+    } catch (error) {
+      console.error(`❌ Erro ao processar fatura ${month}/${year}:`, error);
     }
   };
 
@@ -191,6 +396,77 @@ export default function CanteenManagementScreen({ route, navigation }) {
   const handleRefresh = () => {
     setRefreshing(true);
     fetchInitialData();
+  };
+
+  // ✅ FUNÇÃO PARA SINCRONIZAR FATURAS MANUALMENTE
+  const handleSyncBills = async () => {
+    try {
+      setLoading(true);
+      
+      console.log('🔄 Sincronizando faturas e corrigindo status de pagamentos...');
+      
+      // ✅ CORRIGIR CONSUMOS DIÁRIOS QUE ESTÃO COMO PENDENTES
+      await fixDailyPayments();
+      
+      if (userRole === 'parent') {
+        await fetchBillsForParent();
+      } else {
+        await fetchBills();
+      }
+      
+      // Recarregar consumos também
+      await fetchConsumptions();
+      
+      Alert.alert(
+        '✅ Sincronização Completa', 
+        'Faturas atualizadas e pagamentos diários corrigidos!'
+      );
+      
+    } catch (error) {
+      console.error('❌ Erro ao sincronizar faturas:', error);
+      Alert.alert('Erro', 'Não foi possível sincronizar as faturas. Tente novamente.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ✅ FUNÇÃO PARA CORRIGIR CONSUMOS DIÁRIOS QUE ESTÃO COMO PENDENTES
+  const fixDailyPayments = async () => {
+    try {
+      console.log('🔧 Corrigindo status de pagamentos diários...');
+      
+      // Buscar consumos diários que estão marcados como pendentes
+      const { data: dailyPendingConsumptions, error } = await supabase
+        .from('canteen_consumption')
+        .select('id, consumed_at, payment_method, payment_status')
+        .eq('payment_method', 'daily')
+        .eq('payment_status', 'pending');
+
+      if (error) throw error;
+
+      if (dailyPendingConsumptions && dailyPendingConsumptions.length > 0) {
+        console.log(`🔧 Encontrados ${dailyPendingConsumptions.length} consumos diários para corrigir`);
+        
+        // Atualizar todos os consumos diários para 'paid'
+        const { error: updateError } = await supabase
+          .from('canteen_consumption')
+          .update({ 
+            payment_status: 'paid',
+            payment_date: new Date().toISOString()
+          })
+          .eq('payment_method', 'daily')
+          .eq('payment_status', 'pending');
+
+        if (updateError) throw updateError;
+        
+        console.log('✅ Consumos diários corrigidos com sucesso!');
+      } else {
+        console.log('✅ Todos os consumos diários já estão corretos');
+      }
+      
+    } catch (error) {
+      console.error('❌ Erro ao corrigir pagamentos diários:', error);
+    }
   };
 
   const handleConfirmPayment = async (bill) => {
@@ -291,6 +567,12 @@ export default function CanteenManagementScreen({ route, navigation }) {
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
       
+      // ✅ DEFINIR STATUS DE PAGAMENTO BASEADO NO MÉTODO
+      const paymentStatus = paymentMethod === 'daily' ? 'paid' : 'pending';
+      const paymentDate = paymentMethod === 'daily' ? new Date().toISOString() : null;
+      
+      console.log(`💰 Registrando consumo - Método: ${paymentMethod}, Status: ${paymentStatus}`);
+      
       const consumptionData = selectedStudents.map(studentId => ({
         student_id: studentId,
         item_id: selectedItem.id,
@@ -298,6 +580,8 @@ export default function CanteenManagementScreen({ route, navigation }) {
         unit_price: selectedItem.price,
         total_price: selectedItem.price * parseInt(quantity),
         payment_method: paymentMethod,
+        payment_status: paymentStatus,  // ✅ DEFINIR STATUS CORRETO
+        payment_date: paymentDate,      // ✅ DATA DE PAGAMENTO PARA DIÁRIOS
         added_by: user.id
       }));
 
@@ -307,11 +591,17 @@ export default function CanteenManagementScreen({ route, navigation }) {
 
       if (error) throw error;
 
+      // ✅ ATUALIZAR FATURAS APENAS PARA PAGAMENTOS MENSAIS
       if (paymentMethod === 'monthly') {
+        console.log('📋 Atualizando faturas mensais...');
         await updateMonthlyBills(selectedStudents, selectedItem.price * parseInt(quantity));
+      } else {
+        console.log('💵 Pagamento diário - não gera fatura mensal');
       }
 
-      Alert.alert('Sucesso', 'Consumo registrado com sucesso!');
+      const methodText = paymentMethod === 'daily' ? 'Pago imediatamente' : 'Adicionado à fatura mensal';
+      Alert.alert('Sucesso', `Consumo registrado com sucesso! ${methodText}`);
+      
       resetConsumptionForm();
       setConsumptionModalVisible(false);
       fetchConsumptions();
@@ -567,36 +857,61 @@ export default function CanteenManagementScreen({ route, navigation }) {
         </View>
       </View>
       
+      {/* ✅ SEÇÃO PIX MELHORADA PARA PAIS */}
       {item.status !== 'paid' && (
-        <View style={styles.billActions}>
-          <TouchableOpacity 
-            style={[styles.pixButton, { backgroundColor: theme.colors.primary + '10' }]} 
-            onPress={copyPixKey}
-          >
-            <Ionicons name="copy" size={16} color={theme.colors.primary} />
-            <Text style={[styles.pixButtonText, { color: theme.colors.primary }]}>
-              Copiar PIX
-            </Text>
-          </TouchableOpacity>
-          
-          {userRole === 'teacher' && (
+        <>
+          <View style={styles.billActions}>
             <TouchableOpacity 
-              style={[styles.confirmButton, { backgroundColor: theme.colors.success }]} 
-              onPress={() => handleConfirmPayment(item)}
+              style={[styles.pixButton, { backgroundColor: theme.colors.primary + '10' }]} 
+              onPress={copyPixKey}
             >
-              <Ionicons name="checkmark-circle" size={16} color="white" />
-              <Text style={[styles.confirmButtonText, { color: 'white' }]}>
-                Confirmar Pago
+              <Ionicons name="copy" size={16} color={theme.colors.primary} />
+              <Text style={[styles.pixButtonText, { color: theme.colors.primary }]}>
+                Copiar PIX
               </Text>
             </TouchableOpacity>
-          )}
-        </View>
-      )}
-      
-      {item.status !== 'paid' && (
-        <Text style={[styles.pixKey, { color: theme.colors.text.secondary }]}>
-          {theme.school.shortName}: {pixKey}
-        </Text>
+            
+            {/* BOTÃO PARA CONFIRMAR PAGAMENTO (só para professores) */}
+            {userRole === 'teacher' && (
+              <TouchableOpacity 
+                style={[styles.confirmButton, { backgroundColor: theme.colors.success }]} 
+                onPress={() => handleConfirmPayment(item)}
+              >
+                <Ionicons name="checkmark-circle" size={16} color="white" />
+                <Text style={[styles.confirmButtonText, { color: 'white' }]}>
+                  Confirmar Pago
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          
+          {/* ✅ CHAVE PIX DESTACADA */}
+          <View style={[styles.pixSection, { backgroundColor: theme.colors.primary + '05' }]}>
+            <View style={styles.pixHeader}>
+              <Ionicons name="card" size={16} color={theme.colors.primary} />
+              <Text style={[styles.pixTitle, { color: theme.colors.primary }]}>
+                Pagamento via PIX
+              </Text>
+            </View>
+            <TouchableOpacity 
+              style={styles.pixKeyContainer}
+              onPress={copyPixKey}
+            >
+              <Text style={[styles.pixKeyLabel, { color: theme.colors.text.secondary }]}>
+                Chave PIX do {theme.school.shortName}:
+              </Text>
+              <Text style={[styles.pixKeyValue, { color: theme.colors.text.primary }]}>
+                {pixKey}
+              </Text>
+              <View style={styles.copyHint}>
+                <Ionicons name="copy-outline" size={12} color={theme.colors.text.light} />
+                <Text style={[styles.copyHintText, { color: theme.colors.text.light }]}>
+                  Toque para copiar
+                </Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </>
       )}
     </View>
   );
@@ -618,6 +933,47 @@ export default function CanteenManagementScreen({ route, navigation }) {
     const emptyText = activeTab === 'items' ? 'Nenhum item cadastrado' :
                      activeTab === 'consumption' ? 'Nenhum consumo registrado' : 'Nenhuma fatura encontrada';
 
+    // ✅ INFORMATIVO PARA A ABA DE CONSUMO
+    const ListHeaderComponent = () => {
+      if (activeTab === 'bills' && userRole === 'parent') {
+        return (
+          <View style={[styles.infoCard, { backgroundColor: theme.colors.info + '10' }]}>
+            <View style={styles.infoHeader}>
+              <Ionicons name="information-circle" size={20} color={theme.colors.info} />
+              <Text style={[styles.infoTitle, { color: theme.colors.info }]}>
+                Como funciona o pagamento
+              </Text>
+            </View>
+            <Text style={[styles.infoText, { color: theme.colors.text.secondary }]}>
+              • <Text style={{ fontWeight: 'bold' }}>Pagamento Mensal:</Text> Consumos são agrupados em faturas mensais{'\n'}
+              • <Text style={{ fontWeight: 'bold' }}>Pagamento Diário:</Text> Pago na hora, não gera fatura{'\n'}
+              • <Text style={{ fontWeight: 'bold' }}>Vencimento:</Text> Todo dia 5 do mês seguinte
+            </Text>
+          </View>
+        );
+      }
+      
+      if (activeTab === 'consumption' && userRole === 'parent') {
+        return (
+          <View style={[styles.infoCard, { backgroundColor: theme.colors.success + '10' }]}>
+            <View style={styles.infoHeader}>
+              <Ionicons name="receipt" size={20} color={theme.colors.success} />
+              <Text style={[styles.infoTitle, { color: theme.colors.success }]}>
+                Histórico de Consumo
+              </Text>
+            </View>
+            <Text style={[styles.infoText, { color: theme.colors.text.secondary }]}>
+              • <Text style={{ fontWeight: 'bold', color: theme.colors.success }}>Pago:</Text> Pagamentos diários ou faturas quitadas{'\n'}
+              • <Text style={{ fontWeight: 'bold', color: theme.colors.warning }}>Pendente:</Text> Aguardando pagamento mensal{'\n'}
+              • Clique no botão 🔄 para atualizar status
+            </Text>
+          </View>
+        );
+      }
+      
+      return null;
+    };
+
     return (
       <FlatList
         data={data}
@@ -631,6 +987,7 @@ export default function CanteenManagementScreen({ route, navigation }) {
           />
         }
         contentContainerStyle={styles.listContainer}
+        ListHeaderComponent={ListHeaderComponent}
         ListEmptyComponent={
           <View style={styles.emptyState}>
             <Ionicons name={emptyIcon} size={64} color={theme.colors.text.light} />
@@ -640,6 +997,15 @@ export default function CanteenManagementScreen({ route, navigation }) {
             <Text style={[styles.emptyStateSubtext, { color: theme.colors.text.light }]}>
               {theme.school.shortName}
             </Text>
+            {/* ✅ DICA ADICIONAL PARA FATURAS VAZIAS */}
+            {activeTab === 'bills' && userRole === 'parent' && (
+              <View style={styles.emptyHint}>
+                <Text style={[styles.emptyHintText, { color: theme.colors.text.light }]}>
+                  Faturas aparecerão aqui quando houver{'\n'}
+                  consumos com <Text style={{ fontWeight: 'bold' }}>pagamento mensal</Text>
+                </Text>
+              </View>
+            )}
           </View>
         }
       />
@@ -659,7 +1025,14 @@ export default function CanteenManagementScreen({ route, navigation }) {
           <Text style={[styles.headerSubtitle, { color: theme.colors.text.inverse }]}>
             {theme.school.shortName}
           </Text>
+          {/* ✅ MOSTRAR INFORMAÇÃO PARA PAIS */}
+          {userRole === 'parent' && bills.length > 0 && (
+            <Text style={[styles.headerInfo, { color: theme.colors.text.inverse }]}>
+              {bills.filter(b => b.status !== 'paid').length} faturas pendentes
+            </Text>
+          )}
         </View>
+        {/* ✅ BOTÃO + APENAS PARA PROFESSORES */}
         {userRole === 'teacher' && (
           <TouchableOpacity
             onPress={() => {
@@ -671,6 +1044,34 @@ export default function CanteenManagementScreen({ route, navigation }) {
             }}
           >
             <Ionicons name="add" size={24} color={theme.colors.text.inverse} />
+          </TouchableOpacity>
+        )}
+        {/* ✅ BOTÃO PARA PAIS ACESSAREM FATURAS DIRETAMENTE */}
+        {userRole === 'parent' && activeTab !== 'bills' && bills.length > 0 && (
+          <TouchableOpacity
+            onPress={() => setActiveTab('bills')}
+            style={styles.billsAccessButton}
+          >
+            <Ionicons name="card" size={20} color={theme.colors.text.inverse} />
+            <Text style={[styles.billsAccessText, { color: theme.colors.text.inverse }]}>
+              Faturas
+            </Text>
+          </TouchableOpacity>
+        )}
+        
+        {/* ✅ BOTÃO PARA SINCRONIZAR FATURAS */}
+        {userRole === 'parent' && activeTab === 'bills' && (
+          <TouchableOpacity
+            onPress={handleSyncBills}
+            style={styles.syncButton}
+            disabled={loading}
+          >
+            <Ionicons 
+              name="refresh" 
+              size={20} 
+              color={theme.colors.text.inverse}
+              style={loading ? { transform: [{ rotate: '360deg' }] } : {}}
+            />
           </TouchableOpacity>
         )}
       </View>
@@ -1008,6 +1409,33 @@ const styles = StyleSheet.create({
     opacity: 0.9,
     marginTop: 2,
   },
+  headerInfo: {
+    fontSize: theme.typography.small.fontSize,
+    opacity: 0.8,
+    marginTop: 4,
+    fontWeight: '500',
+  },
+  billsAccessButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: theme.borderRadius.sm,
+  },
+  billsAccessText: {
+    marginLeft: 4,
+    fontSize: theme.typography.small.fontSize,
+    fontWeight: '500',
+  },
+  syncButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   tabBar: {
     flexDirection: 'row',
     elevation: 2,
@@ -1035,6 +1463,27 @@ const styles = StyleSheet.create({
   },
   listContainer: {
     padding: theme.spacing.md,
+  },
+  infoCard: {
+    borderRadius: theme.borderRadius.lg,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    borderWidth: 1,
+    borderColor: theme.colors.info + '30',
+  },
+  infoHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.sm,
+  },
+  infoTitle: {
+    marginLeft: theme.spacing.sm,
+    fontSize: theme.typography.caption.fontSize,
+    fontWeight: 'bold',
+  },
+  infoText: {
+    fontSize: theme.typography.small.fontSize,
+    lineHeight: 20,
   },
   itemCard: {
     borderRadius: theme.borderRadius.lg,
@@ -1183,6 +1632,51 @@ const styles = StyleSheet.create({
     fontSize: theme.typography.small.fontSize,
     marginTop: 8,
   },
+  pixSection: {
+    marginTop: theme.spacing.sm,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.primary + '20',
+  },
+  pixHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: theme.spacing.sm,
+  },
+  pixTitle: {
+    marginLeft: 6,
+    fontSize: theme.typography.caption.fontSize,
+    fontWeight: '600',
+  },
+  pixKeyContainer: {
+    padding: theme.spacing.sm,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.borderRadius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderStyle: 'dashed',
+  },
+  pixKeyLabel: {
+    fontSize: theme.typography.small.fontSize,
+    marginBottom: 4,
+  },
+  pixKeyValue: {
+    fontSize: theme.typography.body.fontSize,
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+    marginBottom: 6,
+  },
+  copyHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  copyHintText: {
+    marginLeft: 4,
+    fontSize: theme.typography.small.fontSize,
+    fontStyle: 'italic',
+  },
   statusBadge: {
     paddingHorizontal: theme.spacing.sm,
     paddingVertical: 4,
@@ -1206,6 +1700,15 @@ const styles = StyleSheet.create({
   emptyStateSubtext: {
     fontSize: theme.typography.caption.fontSize,
     marginTop: 5,
+  },
+  emptyHint: {
+    marginTop: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
+  },
+  emptyHintText: {
+    fontSize: theme.typography.caption.fontSize,
+    textAlign: 'center',
+    lineHeight: 18,
   },
   loader: {
     marginTop: 50,

@@ -21,7 +21,7 @@ import { theme } from '../styles/theme';
 import { useAuth } from '../contexts/AuthContext';
 
 // Importe sua logo real aqui
- const LogoUniversoSaber = require('../../assets/images/logo-universo-saber.png');
+const LogoUniversoSaber = require('../../assets/images/logo-universo-saber.png');
 
 const { height: screenHeight } = Dimensions.get('window');
 
@@ -265,6 +265,9 @@ export default function AuthScreen({ navigation }) {
                       autoCapitalize="words"
                       editable={!loading}
                       returnKeyType="next"
+                      // Autofill para nome
+                      textContentType="name"
+                      autoComplete="name"
                     />
                   </View>
                 </View>
@@ -289,6 +292,17 @@ export default function AuthScreen({ navigation }) {
                     autoCapitalize="none"
                     editable={!loading}
                     returnKeyType="next"
+                    // ✅ AUTOFILL MELHORADO PARA EMAIL
+                    textContentType="username" // Mudança importante: usar 'username' em vez de 'emailAddress'
+                    autoComplete="username" // Também usar 'username' para melhor compatibilidade
+                    autoCorrect={false}
+                    spellCheck={false}
+                    clearButtonMode="while-editing" // iOS: botão para limpar
+                    // Propriedades Android específicas
+                    importantForAutofill="yes"
+                    autoFocus={false}
+                    // Suporte para autofill em formulários de login
+                    nativeID="email-input"
                   />
                 </View>
               </View>
@@ -312,6 +326,16 @@ export default function AuthScreen({ navigation }) {
                     editable={!loading}
                     returnKeyType={isSignUp ? "next" : "done"}
                     onSubmitEditing={isSignUp ? undefined : handleAuth}
+                    // ✅ AUTOFILL MELHORADO PARA SENHA
+                    textContentType={isSignUp ? "newPassword" : "password"}
+                    autoComplete={isSignUp ? "new-password" : "current-password"} // Mudança importante
+                    autoCorrect={false}
+                    spellCheck={false}
+                    clearTextOnFocus={false} // Não limpar texto quando focar
+                    // Propriedades adicionais
+                    importantForAutofill="yes"
+                    passwordRules={isSignUp ? "minlength: 6;" : undefined}
+                    nativeID="password-input"
                   />
                 </View>
               </View>
