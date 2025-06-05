@@ -2,11 +2,34 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useNotifications } from '../contexts/NotificationContext';
 
-export const NotificationBadge = ({ style, size = 'normal' }) => {
-  const { unreadCount } = useNotifications();
+export const NotificationBadge = ({ 
+  style, 
+  size = 'normal',
+  type = 'total' // 'total', 'pickup', 'push'
+}) => {
+  const { 
+    unreadCount,           // pickup notifications (existente)
+    pushUnreadCount,       // push notifications (novo)
+    totalUnreadCount       // total combinado (novo)
+  } = useNotifications();
+
+  // Escolher qual contador usar baseado no tipo
+  let count = 0;
+  switch (type) {
+    case 'pickup':
+      count = unreadCount || 0;
+      break;
+    case 'push':
+      count = pushUnreadCount || 0;
+      break;
+    case 'total':
+    default:
+      count = totalUnreadCount || 0;
+      break;
+  }
 
   // Não renderizar nada se não houver notificações
-  if (!unreadCount || unreadCount === 0) return null;
+  if (!count || count === 0) return null;
 
   const badgeSize = size === 'small' ? styles.badgeSmall : styles.badge;
   const textSize = size === 'small' ? styles.badgeTextSmall : styles.badgeText;
@@ -14,7 +37,7 @@ export const NotificationBadge = ({ style, size = 'normal' }) => {
   return (
     <View style={[badgeSize, style]}>
       <Text style={textSize}>
-        {unreadCount > 99 ? '99+' : String(unreadCount)}
+        {count > 99 ? '99+' : String(count)}
       </Text>
     </View>
   );

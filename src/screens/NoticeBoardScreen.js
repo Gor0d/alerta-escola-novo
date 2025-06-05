@@ -14,13 +14,63 @@ import {
   RefreshControl,
   TouchableWithoutFeedback,
   Keyboard,
-  ScrollView
+  ScrollView,
+  Platform
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { supabase } from '../services/supabase';
-import { theme } from '../styles/theme';
+
+// Tema local (caso o arquivo externo não funcione)
+const theme = {
+  colors: {
+    primary: '#0066CC',
+    secondary: '#004499',
+    success: '#10B981',
+    warning: '#F59E0B',
+    error: '#EF4444',
+    info: '#3B82F6',
+    
+    background: '#F8FAFC',
+    card: '#FFFFFF',
+    border: '#E2E8F0',
+    
+    text: {
+      primary: '#1F2937',
+      secondary: '#6B7280',
+      light: '#9CA3AF',
+      inverse: '#FFFFFF'
+    }
+  },
+  
+  typography: {
+    h1: { fontSize: 32, fontWeight: 'bold' },
+    h2: { fontSize: 24, fontWeight: 'bold' },
+    h3: { fontSize: 20, fontWeight: '600' },
+    body: { fontSize: 16, fontWeight: 'normal' },
+    bodySmall: { fontSize: 14, fontWeight: 'normal' },
+    caption: { fontSize: 12, fontWeight: 'normal' }
+  },
+  
+  spacing: { xs: 4, sm: 8, md: 16, lg: 24, xl: 32 },
+  borderRadius: { sm: 4, md: 8, lg: 12, xl: 16 },
+  
+  shadows: {
+    medium: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.15,
+      shadowRadius: 4,
+      elevation: 4,
+    }
+  },
+  
+  school: {
+    name: 'Universo do Saber',
+    shortName: 'Universo do Saber',
+  }
+};
 
 export default function NoticeBoardScreen({ route, navigation }) {
   const { userRole, classId } = route.params || {};
@@ -46,11 +96,30 @@ export default function NoticeBoardScreen({ route, navigation }) {
 
   useEffect(() => {
     fetchNotices();
+    requestPermissions();
   }, []);
 
-  // NOVA FUNÇÃO: Dispensar teclado
+  const requestPermissions = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        console.log('⚠️ Permissão para galeria negada');
+      }
+    } catch (error) {
+      console.error('❌ Erro ao solicitar permissões:', error);
+    }
+  };
+
   const dismissKeyboard = () => {
     Keyboard.dismiss();
+  };
+
+  const resetForm = () => {
+    setTitle('');
+    setContent('');
+    setNoticeType('general');
+    setSelectedImage(null);
+    setSelectedAttachment(null);
   };
 
   const fetchNotices = async () => {
@@ -67,7 +136,6 @@ export default function NoticeBoardScreen({ route, navigation }) {
         .eq('is_active', true)
         .order('created_at', { ascending: false });
 
-      // Filtrar por turma se especificado
       if (classId) {
         query = query.or(`class_id.eq.${classId},class_id.is.null`);
       }
@@ -91,52 +159,72 @@ export default function NoticeBoardScreen({ route, navigation }) {
   };
 
   const pickImage = async () => {
-    // Dispensar teclado antes de abrir o picker
     dismissKeyboard();
     
     try {
-      // CORRIGIDO: Usar MediaType em vez de MediaTypeOptions (deprecated)
+      console.log('📸 Iniciando seleção de imagem...');
+      
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permissão Necessária', 
+          'Precisamos de permissão para acessar sua galeria de fotos.',
+          [
+            { text: 'Cancelar', style: 'cancel' },
+            { 
+              text: 'Configurações', 
+              onPress: () => {
+                if (Platform.OS === 'ios') {
+                  Alert.alert('Configurações', 'Vá em Configurações > Privacidade > Fotos e ative para este app');
+                } else {
+                  Alert.alert('Configurações', 'Vá em Configurações > Apps > Permissões e ative o acesso à galeria');
+                }
+              }
+            }
+          ]
+        );
+        return;
+      }
+
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaType.Images,
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
         aspect: [16, 9],
         quality: 0.8,
         base64: false,
       });
 
-      console.log('📸 Resultado do picker:', {
-        canceled: result.canceled,
-        hasAssets: result.assets?.length > 0,
-        uri: result.assets?.[0]?.uri?.substring(0, 80) + '...' || 'N/A'
-      });
-
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const selectedAsset = result.assets[0];
-        console.log('✅ Imagem selecionada:', {
-          uri: selectedAsset.uri,
-          width: selectedAsset.width,
-          height: selectedAsset.height,
-          fileSize: selectedAsset.fileSize
-        });
         setSelectedImage(selectedAsset);
+        Alert.alert('Sucesso', 'Imagem selecionada com sucesso!');
       }
     } catch (error) {
       console.error('❌ Erro ao selecionar imagem:', error);
-      Alert.alert('Erro', 'Não foi possível selecionar a imagem');
+      Alert.alert('Erro', `Não foi possível selecionar a imagem: ${error.message}`);
     }
   };
 
   const pickDocument = async () => {
-    // Dispensar teclado antes de abrir o picker
     dismissKeyboard();
     
-    const result = await DocumentPicker.getDocumentAsync({
-      type: ['application/pdf', 'image/*', 'text/*'],
-      copyToCacheDirectory: true
-    });
+    try {
+      console.log('📎 Iniciando seleção de documento...');
+      
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf', 'image/*', 'text/*', 'application/msword'],
+        copyToCacheDirectory: true,
+        multiple: false
+      });
 
-    if (!result.canceled) {
-      setSelectedAttachment(result.assets[0]);
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const selectedDoc = result.assets[0];
+        setSelectedAttachment(selectedDoc);
+        Alert.alert('Sucesso', 'Documento selecionado com sucesso!');
+      }
+    } catch (error) {
+      console.error('❌ Erro ao selecionar documento:', error);
+      Alert.alert('Erro', `Não foi possível selecionar o documento: ${error.message}`);
     }
   };
 
@@ -151,7 +239,6 @@ export default function NoticeBoardScreen({ route, navigation }) {
       
       const { data: { user } } = await supabase.auth.getUser();
       
-      // CORRIGIDO: Remover attachment_name que não existe na tabela
       const noticeData = {
         title: title.trim(),
         content: content.trim(),
@@ -162,13 +249,6 @@ export default function NoticeBoardScreen({ route, navigation }) {
         attachment_url: selectedAttachment?.uri || null
       };
 
-      console.log('🖼️ Criando aviso com dados:', {
-        title: noticeData.title,
-        hasImage: !!selectedImage,
-        hasAttachment: !!selectedAttachment,
-        type: noticeData.type
-      });
-
       const { data, error } = await supabase
         .from('notices')
         .insert([noticeData])
@@ -176,7 +256,6 @@ export default function NoticeBoardScreen({ route, navigation }) {
 
       if (error) throw error;
 
-      console.log('✅ Aviso criado com sucesso:', data);
       Alert.alert('Sucesso', 'Aviso criado com sucesso!');
       resetForm();
       setModalVisible(false);
@@ -189,11 +268,10 @@ export default function NoticeBoardScreen({ route, navigation }) {
     }
   };
 
-  // NOVA FUNÇÃO: Apagar aviso
   const handleDeleteNotice = async (notice) => {
     Alert.alert(
       'Excluir Aviso',
-      `Tem certeza que deseja excluir o aviso "${notice.title}"?\n\nEsta ação não pode ser desfeita.`,
+      `Tem certeza que deseja excluir o aviso "${notice.title}"?`,
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -205,27 +283,20 @@ export default function NoticeBoardScreen({ route, navigation }) {
               
               const { data: { user } } = await supabase.auth.getUser();
               
-              // Verificar se o usuário é o autor do aviso
               if (notice.author_id !== user.id) {
                 Alert.alert('Erro', 'Você só pode excluir seus próprios avisos');
                 return;
               }
 
-              console.log('🗑️ Excluindo aviso:', notice.id, notice.title);
-
               const { error } = await supabase
                 .from('notices')
                 .delete()
                 .eq('id', notice.id)
-                .eq('author_id', user.id); // Segurança extra
+                .eq('author_id', user.id);
 
               if (error) throw error;
 
-              console.log('✅ Aviso excluído com sucesso');
-              
-              // Atualizar lista local
               setNotices(notices.filter(n => n.id !== notice.id));
-              
               Alert.alert('Sucesso', 'Aviso excluído com sucesso!');
             } catch (error) {
               console.error('❌ Erro ao excluir aviso:', error);
@@ -251,16 +322,6 @@ export default function NoticeBoardScreen({ route, navigation }) {
 
   const getNoticeTypeInfo = (type) => {
     return noticeTypes.find(nt => nt.key === type) || noticeTypes[0];
-  };
-
-  // NOVA FUNÇÃO: Verificar se o usuário pode excluir o aviso
-  const canDeleteNotice = async (notice) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      return user && notice.author_id === user.id;
-    } catch {
-      return false;
-    }
   };
 
   const renderNoticeItem = ({ item }) => {
@@ -289,12 +350,11 @@ export default function NoticeBoardScreen({ route, navigation }) {
             )}
           </View>
           
-          {/* NOVO: Botão de excluir (só para o autor) */}
           {userRole === 'teacher' && (
             <TouchableOpacity
               style={styles.deleteNoticeButton}
               onPress={(e) => {
-                e.stopPropagation(); // Evitar abrir o modal
+                e.stopPropagation();
                 handleDeleteNotice(item);
               }}
             >
@@ -313,22 +373,7 @@ export default function NoticeBoardScreen({ route, navigation }) {
               source={{ uri: item.image_url }} 
               style={styles.attachedImage}
               resizeMode="cover"
-              onError={(error) => {
-                console.log('❌ Erro ao carregar imagem:', item.image_url, error.nativeEvent.error);
-              }}
-              onLoad={() => {
-                console.log('✅ Imagem carregada com sucesso:', item.image_url.substring(0, 50) + '...');
-              }}
             />
-          </View>
-        )}
-        
-        {item.image_url && item.image_url.includes('example.com') && (
-          <View style={styles.imagePlaceholder}>
-            <Ionicons name="image" size={24} color={theme.colors.text.secondary} />
-            <Text style={[styles.imagePlaceholderText, { color: theme.colors.text.secondary }]}>
-              Imagem anexada (URL inválida)
-            </Text>
           </View>
         )}
         
@@ -360,7 +405,7 @@ export default function NoticeBoardScreen({ route, navigation }) {
             noticeType === type.key && { backgroundColor: type.color }
           ]}
           onPress={() => {
-            dismissKeyboard(); // Dispensar teclado ao selecionar tipo
+            dismissKeyboard();
             setNoticeType(type.key);
           }}
         >
@@ -435,7 +480,7 @@ export default function NoticeBoardScreen({ route, navigation }) {
         />
       )}
 
-      {/* Modal para criar aviso - CORRIGIDO com TouchableWithoutFeedback */}
+      {/* Modal para criar aviso */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -642,19 +687,7 @@ export default function NoticeBoardScreen({ route, navigation }) {
                             source={{ uri: selectedNotice.image_url }} 
                             style={styles.fullImage}
                             resizeMode="contain"
-                            onError={(error) => {
-                              console.log('❌ Erro ao carregar imagem no modal:', selectedNotice.image_url, error.nativeEvent.error);
-                            }}
                           />
-                        </View>
-                      )}
-                      
-                      {selectedNotice.image_url && selectedNotice.image_url.includes('example.com') && (
-                        <View style={[styles.imagePlaceholder, { marginVertical: theme.spacing.md }]}>
-                          <Ionicons name="image" size={32} color={theme.colors.text.secondary} />
-                          <Text style={[styles.imagePlaceholderText, { color: theme.colors.text.secondary }]}>
-                            Imagem anexada (URL inválida)
-                          </Text>
                         </View>
                       )}
                       
@@ -662,13 +695,7 @@ export default function NoticeBoardScreen({ route, navigation }) {
                         <TouchableOpacity 
                           style={[styles.attachmentLink, { backgroundColor: theme.colors.primary + '10' }]}
                           onPress={() => {
-                            Alert.alert(
-                              'Anexo', 
-                              'Arquivo anexado ao aviso',
-                              [
-                                { text: 'OK', style: 'default' }
-                              ]
-                            );
+                            Alert.alert('Anexo', 'Arquivo anexado ao aviso');
                           }}
                         >
                           <Ionicons name="attach" size={20} color={theme.colors.primary} />
@@ -687,12 +714,11 @@ export default function NoticeBoardScreen({ route, navigation }) {
                         </Text>
                       </TouchableOpacity>
                       
-                      {/* NOVO: Botão de excluir no modal (só para o autor) */}
                       {userRole === 'teacher' && (
                         <TouchableOpacity
-                          style={[styles.deleteButton, { backgroundColor: theme.colors.error, marginTop: theme.spacing.sm }]}
+                          style={[styles.deleteButton, { backgroundColor: theme.colors.error, marginTop: 8 }]}
                           onPress={() => {
-                            setSelectedNotice(null); // Fechar modal primeiro
+                            setSelectedNotice(null);
                             setTimeout(() => handleDeleteNotice(selectedNotice), 100);
                           }}
                         >
@@ -719,7 +745,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   header: {
-    padding: theme.spacing.lg,
+    padding: 24,
     paddingTop: 50,
     flexDirection: 'row',
     alignItems: 'center',
@@ -728,30 +754,30 @@ const styles = StyleSheet.create({
   headerTitleContainer: {
     flex: 1,
     alignItems: 'center',
-    marginHorizontal: theme.spacing.lg,
+    marginHorizontal: 24,
   },
   headerTitle: {
-    fontSize: theme.typography.h2.fontSize,
-    fontWeight: theme.typography.h2.fontWeight,
+    fontSize: 24,
+    fontWeight: 'bold',
   },
   headerSubtitle: {
-    fontSize: theme.typography.caption.fontSize,
+    fontSize: 12,
     opacity: 0.9,
     marginTop: 2,
   },
   listContainer: {
-    padding: theme.spacing.md,
+    padding: 16,
   },
   noticeCard: {
-    backgroundColor: theme.colors.card,
-    borderRadius: theme.borderRadius.lg,
-    padding: theme.spacing.md,
-    marginBottom: theme.spacing.md,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
   },
   noticeHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    marginBottom: theme.spacing.sm,
+    marginBottom: 8,
   },
   typeIcon: {
     width: 40,
@@ -759,39 +785,27 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: theme.spacing.sm,
+    marginRight: 8,
   },
   noticeInfo: {
     flex: 1,
   },
   noticeTitle: {
-    fontSize: theme.typography.body.fontSize,
+    fontSize: 16,
     fontWeight: 'bold',
     marginBottom: 4,
   },
   noticeAuthor: {
-    fontSize: theme.typography.small.fontSize,
+    fontSize: 12,
   },
   noticeClass: {
-    fontSize: theme.typography.small.fontSize,
+    fontSize: 12,
     marginTop: 2,
   },
   noticeContent: {
-    fontSize: theme.typography.caption.fontSize,
+    fontSize: 14,
     lineHeight: 20,
-    marginBottom: theme.spacing.sm,
-  },
-  imagePlaceholder: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: theme.spacing.sm,
-    backgroundColor: theme.colors.background,
-    borderRadius: theme.borderRadius.md,
-    marginBottom: theme.spacing.sm,
-  },
-  imagePlaceholderText: {
-    marginLeft: theme.spacing.sm,
-    fontSize: theme.typography.caption.fontSize,
+    marginBottom: 8,
   },
   noticeFooter: {
     flexDirection: 'row',
@@ -802,135 +816,133 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  // NOVOS: Estilos para botão de excluir
   deleteNoticeButton: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: theme.colors.error + '15',
+    backgroundColor: '#EF444415',
     justifyContent: 'center',
     alignItems: 'center',
-    marginLeft: theme.spacing.sm,
+    marginLeft: 8,
   },
   deleteButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: theme.spacing.sm,
-    borderRadius: theme.borderRadius.md,
+    padding: 8,
+    borderRadius: 8,
   },
   deleteButtonText: {
-    fontSize: theme.typography.body.fontSize,
+    fontSize: 16,
     fontWeight: 'bold',
   },
   typeLabel: {
-    fontSize: theme.typography.small.fontSize,
+    fontSize: 12,
     fontWeight: 'bold',
   },
   modalContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: theme.colors.backdrop,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   modalContent: {
     width: '90%',
     maxHeight: '85%',
-    borderRadius: theme.borderRadius.lg,
-    padding: theme.spacing.lg,
+    borderRadius: 12,
+    padding: 24,
   },
   modalHeader: {
     alignItems: 'center',
-    marginBottom: theme.spacing.lg,
+    marginBottom: 24,
   },
   modalTitle: {
-    fontSize: theme.typography.h2.fontSize,
-    fontWeight: theme.typography.h2.fontWeight,
+    fontSize: 24,
+    fontWeight: 'bold',
   },
   modalSubtitle: {
-    fontSize: theme.typography.caption.fontSize,
+    fontSize: 12,
     marginTop: 4,
   },
   input: {
     borderWidth: 1,
-    borderRadius: theme.borderRadius.md,
-    padding: theme.spacing.sm,
-    marginBottom: theme.spacing.md,
-    fontSize: theme.typography.body.fontSize,
+    borderRadius: 8,
+    padding: 8,
+    marginBottom: 16,
+    fontSize: 16,
   },
   textArea: {
     height: 100,
     textAlignVertical: 'top',
   },
   sectionLabel: {
-    fontSize: theme.typography.body.fontSize,
+    fontSize: 16,
     fontWeight: 'bold',
-    marginBottom: theme.spacing.sm,
+    marginBottom: 8,
   },
   typeSelector: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginBottom: theme.spacing.lg,
+    marginBottom: 24,
   },
   typeOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: theme.spacing.sm,
-    borderRadius: theme.borderRadius.md,
+    padding: 8,
+    borderRadius: 8,
     borderWidth: 1,
     margin: 4,
   },
   typeOptionText: {
     marginLeft: 5,
-    fontSize: theme.typography.small.fontSize,
+    fontSize: 12,
     fontWeight: '500',
   },
   attachmentSection: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    marginBottom: theme.spacing.md,
+    marginBottom: 16,
   },
   attachButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: theme.spacing.sm,
-    borderRadius: theme.borderRadius.md,
+    padding: 8,
+    borderRadius: 8,
     borderWidth: 1,
     borderStyle: 'dashed',
   },
   attachButtonText: {
     marginLeft: 5,
     fontWeight: '500',
-    fontSize: theme.typography.caption.fontSize,
+    fontSize: 12,
   },
-  // NOVOS: Estilos para imagens
   imageContainer: {
-    marginBottom: theme.spacing.sm,
-    borderRadius: theme.borderRadius.md,
+    marginBottom: 8,
+    borderRadius: 8,
     overflow: 'hidden',
   },
   attachedImage: {
     width: '100%',
     height: 200,
-    backgroundColor: theme.colors.background,
+    backgroundColor: '#F8FAFC',
   },
   fullImage: {
     width: '100%',
     height: 250,
-    backgroundColor: theme.colors.background,
+    backgroundColor: '#F8FAFC',
   },
   previewImage: {
     width: 60,
     height: 40,
     borderRadius: 8,
-    marginRight: theme.spacing.sm,
+    marginRight: 8,
   },
   selectedFile: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: theme.spacing.sm,
-    borderRadius: theme.borderRadius.sm,
-    marginBottom: theme.spacing.sm,
+    padding: 8,
+    borderRadius: 4,
+    marginBottom: 8,
   },
   selectedFileInfo: {
     flex: 1,
@@ -940,27 +952,27 @@ const styles = StyleSheet.create({
   selectedFileText: {
     flex: 1,
     marginLeft: 5,
-    fontSize: theme.typography.small.fontSize,
+    fontSize: 12,
   },
   removeFileButton: {
-    marginLeft: theme.spacing.sm,
+    marginLeft: 8,
   },
   modalButtons: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: theme.spacing.lg,
+    marginTop: 24,
   },
   button: {
     flex: 1,
-    padding: theme.spacing.sm,
-    borderRadius: theme.borderRadius.md,
+    padding: 8,
+    borderRadius: 8,
     alignItems: 'center',
     marginHorizontal: 5,
   },
   cancelButton: {},
   saveButton: {},
   buttonText: {
-    fontSize: theme.typography.body.fontSize,
+    fontSize: 16,
     fontWeight: 'bold',
   },
   emptyState: {
@@ -970,12 +982,12 @@ const styles = StyleSheet.create({
     paddingTop: 100,
   },
   emptyStateText: {
-    fontSize: theme.typography.body.fontSize,
-    marginTop: theme.spacing.sm,
+    fontSize: 16,
+    marginTop: 8,
     textAlign: 'center',
   },
   emptyStateSubtext: {
-    fontSize: theme.typography.caption.fontSize,
+    fontSize: 12,
     marginTop: 5,
     textAlign: 'center',
   },
@@ -986,53 +998,53 @@ const styles = StyleSheet.create({
   noticeDetailHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: theme.spacing.md,
+    marginBottom: 16,
   },
   noticeDetailTitleContainer: {
     flex: 1,
-    marginLeft: theme.spacing.sm,
+    marginLeft: 8,
   },
   noticeDetailTitle: {
-    fontSize: theme.typography.h3.fontSize,
-    fontWeight: theme.typography.h3.fontWeight,
+    fontSize: 20,
+    fontWeight: '600',
   },
   schoolBadge: {
-    fontSize: theme.typography.small.fontSize,
+    fontSize: 12,
     fontWeight: '500',
     marginTop: 2,
   },
   noticeDetailMeta: {
-    fontSize: theme.typography.small.fontSize,
+    fontSize: 12,
     marginBottom: 5,
   },
   noticeDetailClass: {
-    fontSize: theme.typography.caption.fontSize,
-    marginBottom: theme.spacing.md,
+    fontSize: 12,
+    marginBottom: 16,
   },
   noticeDetailContent: {
-    fontSize: theme.typography.body.fontSize,
+    fontSize: 16,
     lineHeight: 24,
-    marginBottom: theme.spacing.md,
+    marginBottom: 16,
   },
   attachmentLink: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: theme.spacing.sm,
-    borderRadius: theme.borderRadius.md,
-    marginBottom: theme.spacing.md,
+    padding: 8,
+    borderRadius: 8,
+    marginBottom: 16,
   },
   attachmentLinkText: {
-    marginLeft: theme.spacing.sm,
+    marginLeft: 8,
     fontWeight: '500',
   },
   closeButton: {
-    padding: theme.spacing.sm,
-    borderRadius: theme.borderRadius.md,
+    padding: 8,
+    borderRadius: 8,
     alignItems: 'center',
-    marginTop: theme.spacing.md,
+    marginTop: 16,
   },
   closeButtonText: {
     fontWeight: 'bold',
-    fontSize: theme.typography.body.fontSize,
+    fontSize: 16,
   },
 });

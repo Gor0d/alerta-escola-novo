@@ -1,7 +1,9 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 import { supabase } from '../services/supabase';
 import { useAuth } from './AuthContext';
+// ADICIONAR ESTE IMPORT:
+import notificationService from '../services/NotificationService';
 
 const NotificationContext = createContext();
 
@@ -15,9 +17,113 @@ export const useNotifications = () => {
 
 export const NotificationProvider = ({ children }) => {
   const { user, profile } = useAuth();
+  
+  // Estados existentes (pickup notifications)
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  
+  // NOVOS ESTADOS (push notifications)
+  const [pushNotifications, setPushNotifications] = useState([]);
+  const [pushUnreadCount, setPushUnreadCount] = useState(0);
+  const [pushInitialized, setPushInitialized] = useState(false);
 
+  // ========================================
+  // INICIALIZAÇÃO DO PUSH NOTIFICATIONS
+  // ========================================
+  useEffect(() => {
+    if (user && !pushInitialized) {
+      initializePushNotifications();
+    }
+  }, [user, pushInitialized]);
+
+  // Listener para mudanças no estado do app
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription?.remove();
+  }, []);
+
+  const initializePushNotifications = async () => {
+    try {
+      console.log('🔔 Inicializando Push Notifications...');
+      
+      // Inicializar serviço de notificações push
+      const token = await notificationService.initialize();
+      
+      if (token) {
+        console.log('✅ Push Notifications inicializadas com sucesso');
+        
+        // Enviar notificação de boas-vindas (apenas uma vez)
+        setTimeout(() => {
+          notificationService.sendLocalNotification(
+            'Centro Educacional Universo do Saber',
+            `Olá ${profile?.name}! Sistema de notificações ativado! 🎉📱`,
+            { type: 'system', welcome: true }
+          );
+        }, 2000);
+      }
+      
+      // Carregar histórico de push notifications
+      await fetchPushNotifications();
+      
+      // Configurar subscription para novas push notifications
+      setupPushNotificationSubscription();
+      
+      setPushInitialized(true);
+    } catch (error) {
+      console.error('❌ Erro ao inicializar Push Notifications:', error);
+    }
+  };
+
+  const fetchPushNotifications = async () => {
+    try {
+      const data = await notificationService.getNotificationHistory();
+      setPushNotifications(data);
+      
+      // Contar não lidas
+      const unread = data.filter(n => !n.read).length;
+      setPushUnreadCount(unread);
+      
+      console.log(`📨 ${data.length} push notifications carregadas (${unread} não lidas)`);
+    } catch (error) {
+      console.error('❌ Erro ao buscar push notifications:', error);
+    }
+  };
+
+  const setupPushNotificationSubscription = () => {
+    if (!user) return;
+
+    const subscription = supabase
+      .channel('push-notifications-updates')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          console.log('📨 Nova push notification via real-time:', payload.new);
+          setPushNotifications(prev => [payload.new, ...prev]);
+          setPushUnreadCount(prev => prev + 1);
+        }
+      )
+      .subscribe();
+
+    return () => subscription.unsubscribe();
+  };
+
+  const handleAppStateChange = (nextAppState) => {
+    if (nextAppState === 'active' && user) {
+      console.log('📱 App ativo - atualizando notificações');
+      fetchNotifications(); // Pickup notifications
+      fetchPushNotifications(); // Push notifications
+    }
+  };
+
+  // ========================================
+  // FUNÇÕES EXISTENTES (pickup notifications)
+  // ========================================
   useEffect(() => {
     if (!user) {
       setNotifications([]);
@@ -278,7 +384,90 @@ export const NotificationProvider = ({ children }) => {
     }
   };
 
+  // ========================================
+  // NOVAS FUNÇÕES (push notifications)
+  // ========================================
+  const markPushAsRead = async (notificationId) => {
+    try {
+      await notificationService.markNotificationAsRead(notificationId);
+      
+      setPushNotifications(prev =>
+        prev.map(notification =>
+          notification.id === notificationId
+            ? { ...notification, read: true, read_at: new Date().toISOString() }
+            : notification
+        )
+      );
+      
+      setPushUnreadCount(prev => Math.max(0, prev - 1));
+      console.log('✅ Push notification marcada como lida:', notificationId);
+    } catch (error) {
+      console.error('❌ Erro ao marcar push notification como lida:', error);
+    }
+  };
+
+  const markAllPushAsRead = async () => {
+    try {
+      if (!user) return;
+      
+      // Marcar todas como lidas no banco
+      const { error } = await supabase
+        .from('notifications')
+        .update({ read: true, read_at: new Date().toISOString() })
+        .eq('user_id', user.id)
+        .eq('read', false);
+
+      if (error) throw error;
+      
+      // Atualizar estado local
+      setPushNotifications(prev =>
+        prev.map(notification => ({
+          ...notification,
+          read: true,
+          read_at: new Date().toISOString()
+        }))
+      );
+      
+      setPushUnreadCount(0);
+      await notificationService.clearBadge();
+      
+      console.log('✅ Todas as push notifications marcadas como lidas');
+    } catch (error) {
+      console.error('❌ Erro ao marcar todas push notifications como lidas:', error);
+    }
+  };
+
+  const sendTestPushNotification = async () => {
+    try {
+      await notificationService.sendLocalNotification(
+        'Teste - Universo do Saber',
+        `Olá ${profile?.name}! Esta é uma notificação de teste! Sistema funcionando perfeitamente. 🎉`,
+        { type: 'test', timestamp: new Date().toISOString() }
+      );
+      console.log('🧪 Push notification de teste enviada');
+    } catch (error) {
+      console.error('❌ Erro ao enviar push notification de teste:', error);
+    }
+  };
+
+  // Cleanup quando usuário faz logout
+  useEffect(() => {
+    if (!user && pushInitialized) {
+      console.log('👋 Usuário fez logout - limpando push notifications');
+      setPushNotifications([]);
+      setPushUnreadCount(0);
+      setPushInitialized(false);
+      notificationService.cleanup();
+    }
+  }, [user, pushInitialized]);
+
+  // ========================================
+  // CONTADORES COMBINADOS
+  // ========================================
+  const totalUnreadCount = unreadCount + pushUnreadCount;
+
   const value = {
+    // ===== PICKUP NOTIFICATIONS (existentes) =====
     notifications,
     unreadCount,
     fetchNotifications,
@@ -287,7 +476,19 @@ export const NotificationProvider = ({ children }) => {
     clearAllNotifications,
     respondToPickup,
     sendPickupNotification,
-    createTestNotification // Função extra para testes
+    createTestNotification,
+    
+    // ===== PUSH NOTIFICATIONS (novos) =====
+    pushNotifications,
+    pushUnreadCount,
+    pushInitialized,
+    fetchPushNotifications,
+    markPushAsRead,
+    markAllPushAsRead,
+    sendTestPushNotification,
+    
+    // ===== COMBINADOS =====
+    totalUnreadCount, // Total de notificações não lidas (pickup + push)
   };
 
   return (

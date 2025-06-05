@@ -12,11 +12,16 @@
       "resizeMode": "contain",
       "backgroundColor": "#0066CC"
     },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.gorodis.alertaescolanovo",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "O Centro Educacional Universo do Saber precisa acessar suas fotos para anexar imagens aos avisos.",
-        "NSCameraUsageDescription": "O app precisa acessar a câmera para tirar fotos dos avisos."
+        "NSCameraUsageDescription": "O app precisa acessar a câmera para tirar fotos dos avisos.",
+        "UIBackgroundModes": ["remote-notification"]
       }
     },
     "android": {
@@ -29,11 +34,22 @@
       "permissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.CAMERA"
-      ]
+        "android.permission.CAMERA",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.WAKE_LOCK"
+      ],
+      "useNextNotificationsApi": true
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "notification": {
+      "icon": "./assets/icon.png",
+      "color": "#0066CC",
+      "iosDisplayInForeground": true,
+      "androidMode": "default",
+      "androidCollapsedTitle": "Centro Educacional Universo do Saber"
     },
     "plugins": [
       [
@@ -47,6 +63,15 @@
         "expo-document-picker",
         {
           "iCloudContainerEnvironment": "Production"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#0066CC",
+          "defaultChannel": "escola-alerts",
+          "sounds": []
         }
       ]
     ],

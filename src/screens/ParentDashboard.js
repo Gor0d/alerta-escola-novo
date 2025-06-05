@@ -70,8 +70,11 @@ export default function ParentDashboard({ navigation }) {
           },
           (payload) => {
             console.log('💬 Nova mensagem recebida:', payload);
-            fetchUnreadChats();
-            fetchRecentMessages();
+            // CORRIGIDO: Atualizar contadores quando mensagens mudarem
+            setTimeout(() => {
+              fetchUnreadChats();
+              fetchRecentMessages();
+            }, 500); // Pequeno delay para garantir que a mensagem foi processada
           }
         )
         .subscribe((status) => {
@@ -91,6 +94,17 @@ export default function ParentDashboard({ navigation }) {
       }
     };
   }, [user?.id]); // Dependência do user.id para evitar re-subscriptions desnecessárias
+
+  // NOVO: useEffect para atualizar quando a tela ganha foco
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      console.log('🔄 ParentDashboard ganhou foco - atualizando contadores de chat...');
+      fetchUnreadChats();
+      fetchRecentMessages();
+    });
+
+    return unsubscribe;
+  }, [navigation]);
 
   useEffect(() => {
     // Atualizar dados quando students mudar
@@ -122,12 +136,15 @@ export default function ParentDashboard({ navigation }) {
   // NOVA FUNÇÃO: Buscar chats não lidos
   const fetchUnreadChats = async () => {
     try {
+      console.log('🔍 Buscando chats não lidos para parent:', user.id);
+      
       const { data, error } = await supabase
         .from('messages')
         .select(`
           id,
           conversation_id,
           read,
+          sender_id,
           conversations!inner (
             parent_id
           )
@@ -136,11 +153,22 @@ export default function ParentDashboard({ navigation }) {
         .eq('read', false)
         .neq('sender_id', user.id); // Não contar mensagens próprias
 
-      if (error) throw error;
+      if (error) {
+        console.error('❌ Erro ao buscar chats não lidos:', error);
+        throw error;
+      }
+
+      console.log('📊 Mensagens não lidas encontradas:', data?.length || 0);
+      console.log('🔍 Detalhes das mensagens não lidas:', data?.map(msg => ({
+        id: msg.id,
+        conversation_id: msg.conversation_id,
+        sender_id: msg.sender_id,
+        read: msg.read
+      })));
 
       setUnreadChats(data?.length || 0);
     } catch (error) {
-      console.error('Erro ao buscar chats não lidos:', error);
+      console.error('❌ Erro ao buscar chats não lidos:', error);
       setUnreadChats(0);
     }
   };
