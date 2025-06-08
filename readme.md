@@ -271,6 +271,6 @@ Este projeto está licenciado sob a Licença MIT - veja o arquivo [LICENSE](LICE
   </p>
   
   <p>
-    Feito em Belém do Pará
+    Feito em Belém do Pará - Por Emerson Guimarães
   </p>
 </div>
