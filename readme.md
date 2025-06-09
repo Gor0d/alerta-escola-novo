@@ -78,7 +78,7 @@ Este aplicativo foi desenvolvido como **projeto de extensão** da **Faculdade FA
 - **Email Templates** - Notificações por email
 
 ### Pagamentos
-- **PIX Integration** - Pagamentos via PIX para cantina
+- **PIX** - Pagamentos via PIX (Copia e cola da chave PI) para cantina
 
 ## 🚀 Como Executar o Projeto
 
